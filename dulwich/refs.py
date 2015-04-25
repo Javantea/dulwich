@@ -502,10 +502,11 @@ class DiskRefsContainer(RefsContainer):
                 header = f.read(len(SYMREF))
                 if header == SYMREF:
                     # Read only the first line
-                    return header + next(iter(f)).rstrip(b'\r\n')
+                    return header + next(iter(f)).rstrip(b'\r\n').rstrip(b'\n')
                 else:
+                    # FIXME: This doesn't make sense.
                     # Read only the first 40 bytes
-                    return header + f.read(40 - len(SYMREF))
+                    return header + f.read(40 - len(SYMREF)).rstrip(b'\r\n').rstrip(b'\n')
         except IOError as e:
             if e.errno == errno.ENOENT:
                 return None

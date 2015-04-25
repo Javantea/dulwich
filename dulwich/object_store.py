@@ -662,7 +662,8 @@ class DiskObjectStore(PackBasedObjectStore):
                 raise
         if os.path.exists(path):
             return # Already there, no need to write again
-        with GitFile(path, 'wb') as f:
+        # FIXME: Messy
+        with GitFile(path.encode('utf-8'), 'wb') as f:
             f.write(obj.as_legacy_object())
 
     @classmethod

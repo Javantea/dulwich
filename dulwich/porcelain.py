@@ -66,13 +66,13 @@ from dulwich.objectspec import parse_object
 from dulwich.patch import write_tree_diff
 from dulwich.protocol import Protocol
 from dulwich.repo import (BaseRepo, Repo)
-from dulwich.server import (
-    FileSystemBackend,
-    TCPGitServer,
-    ReceivePackHandler,
-    UploadPackHandler,
-    update_server_info as server_update_server_info,
-    )
+#from dulwich.server import (
+#    FileSystemBackend,
+#    TCPGitServer,
+#    ReceivePackHandler,
+#    UploadPackHandler,
+#    update_server_info as server_update_server_info,
+#    )
 
 
 # Module level tuple definition for status output
@@ -587,7 +587,11 @@ def get_tree_changes(repo):
         'delete': [],
         'modify': [],
     }
-    for change in index.changes_from_tree(r.object_store, r[b'HEAD'].tree):
+    try:
+        curr_head = r[b'HEAD'].tree
+    except KeyError:
+        curr_head = None
+    for change in index.changes_from_tree(r.object_store, curr_head):
         if not change[0][0]:
             tracked_changes['add'].append(change[0][1])
         elif not change[0][1]:

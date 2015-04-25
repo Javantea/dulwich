@@ -608,11 +608,11 @@ class BaseRepo(object):
                 old_head = self.refs[ref]
                 c.parents = [old_head] + merge_heads
                 self.object_store.add_object(c)
-                ok = self.refs.set_if_equals(ref, old_head, c.id)
+                ok = self.refs.set_if_equals(ref, old_head, c.id.encode('ascii'))
             except KeyError:
                 c.parents = merge_heads
                 self.object_store.add_object(c)
-                ok = self.refs.add_if_new(ref, c.id)
+                ok = self.refs.add_if_new(ref, c.id.encode('ascii'))
             if not ok:
                 # Fail if the atomic compare-and-swap failed, leaving the commit and
                 # all its objects as garbage.

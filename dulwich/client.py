@@ -42,7 +42,7 @@ from io import BytesIO, BufferedReader
 import dulwich
 import select
 import socket
-import subprocess
+#import subprocess
 import sys
 
 try:
@@ -619,9 +619,9 @@ class TCPGitClient(TraditionalGitClient):
         proto.send_cmd(b'git-' + cmd, path, b'host=' + self._host)
         return proto, lambda: _fileno_can_read(s)
 
-
+"""
 class SubprocessWrapper(object):
-    """A socket-like object that talks to a subprocess via pipes."""
+    ""A socket-like object that talks to a subprocess via pipes.""
 
     def __init__(self, proc):
         self.proc = proc
@@ -647,10 +647,10 @@ class SubprocessWrapper(object):
         if self.proc.stderr:
             self.proc.stderr.close()
         self.proc.wait()
-
-
+"""
+"""
 class SubprocessGitClient(TraditionalGitClient):
-    """Git client that talks to a server using a subprocess."""
+    ""Git client that talks to a server using a subprocess.""
 
     def __init__(self, *args, **kwargs):
         self._connection = None
@@ -662,6 +662,7 @@ class SubprocessGitClient(TraditionalGitClient):
 
     def _connect(self, service, path):
         import subprocess
+        # FIXME: path manipulation
         argv = ['git', service, path]
         p = SubprocessWrapper(
             subprocess.Popen(argv, bufsize=0, stdin=subprocess.PIPE,
@@ -669,7 +670,7 @@ class SubprocessGitClient(TraditionalGitClient):
                              stderr=self._stderr))
         return Protocol(p.read, p.write, p.close,
                         report_activity=self._report_activity), p.can_read
-
+"""
 
 class LocalGitClient(GitClient):
     """Git Client that just uses a local Repo."""
@@ -761,7 +762,7 @@ class LocalGitClient(GitClient):
 
 
 # What Git client to use for local access
-default_local_git_client_cls = SubprocessGitClient
+default_local_git_client_cls = LocalGitClient
 
 
 class SSHVendor(object):
@@ -787,9 +788,9 @@ class SSHVendor(object):
         """
         raise NotImplementedError(self.run_command)
 
-
+"""
 class SubprocessSSHVendor(SSHVendor):
-    """SSH vendor that shells out to the local 'ssh' command."""
+    ""SSH vendor that shells out to the local 'ssh' command.""
 
     def run_command(self, host, command, username=None, port=None):
         import subprocess
@@ -919,7 +920,6 @@ else:
 # Can be overridden by users
 get_ssh_vendor = SubprocessSSHVendor
 
-
 class SSHGitClient(TraditionalGitClient):
 
     def __init__(self, host, port=None, username=None, *args, **kwargs):
@@ -941,7 +941,12 @@ class SSHGitClient(TraditionalGitClient):
         return (Protocol(con.read, con.write, con.close,
                          report_activity=self._report_activity),
                 con.can_read)
+"""
+class SSHGitClient:
+    def __init__(self):
+        raise NotImplementedError("SSHGitClient is a security risk.")
 
+get_ssh_vendor = SSHGitClient
 
 def default_user_agent_string():
     return "dulwich/%s" % ".".join([str(x) for x in dulwich.__version__])

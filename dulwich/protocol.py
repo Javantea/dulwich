@@ -103,6 +103,7 @@ class Protocol(object):
     """
 
     def __init__(self, read, write, close=None, report_activity=None):
+        # NOTE: These are functions, not variables.
         self.read = read
         self.write = write
         self._close = close

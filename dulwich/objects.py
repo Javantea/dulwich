@@ -112,10 +112,11 @@ def hex_to_filename(path, hex):
     # os.path.join accepts bytes or unicode, but all args must be of the same
     # type. Make sure that hex which is expected to be bytes, is the same type
     # as path.
+    if type(hex) == bytes: hex = hex.decode('ascii')
     directory = hex[:2]
     file = hex[2:]
     # Check from object dir
-    return os.path.join(path, directory, file)
+    return os.path.join(path.decode('utf-8'), directory, file)
 
 
 def filename_to_hex(filename):
@@ -186,10 +187,14 @@ def check_identity(identity, error_msg):
         or not identity.endswith(b'>')):
         raise ObjectFormatException(error_msg)
 
+def ensure_encode(v):
+    if type(v) == str:
+        return v.encode('utf-8')
+    return v
 
 def git_line(*items):
     """Formats items into a space sepreated line."""
-    return b' '.join(items) + b'\n'
+    return b' '.join([ensure_encode(x) for x in items]) + b'\n'
 
 
 class FixedSha(object):
@@ -211,7 +216,9 @@ class FixedSha(object):
 
     def hexdigest(self):
         """Return the hex SHA digest."""
-        return self._hexsha.decode('ascii')
+        # FIXME: This is a bad choice here.
+        #return self._hexsha.decode('ascii')
+        return self._hexsha
 
 
 class ShaFile(object):
@@ -491,7 +498,7 @@ class ShaFile(object):
     @property
     def id(self):
         """The hex SHA of this object."""
-        return self.sha().hexdigest().encode('ascii')
+        return self.sha().hexdigest()
 
     def get_type(self):
         """Return the type number for this object class."""
