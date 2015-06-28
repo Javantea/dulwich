@@ -112,11 +112,12 @@ def hex_to_filename(path, hex):
     # os.path.join accepts bytes or unicode, but all args must be of the same
     # type. Make sure that hex which is expected to be bytes, is the same type
     # as path.
-    if type(hex) == bytes: hex = hex.decode('ascii')
-    directory = hex[:2]
+    if getattr(path, 'encode', None) is not None:
+        hex = hex.decode('ascii')
+    dir = hex[:2]
     file = hex[2:]
     # Check from object dir
-    return os.path.join(path.decode('utf-8'), directory, file)
+    return os.path.join(path, dir, file)
 
 
 def filename_to_hex(filename):

@@ -38,6 +38,7 @@ Known capabilities that are not supported:
 
 __docformat__ = 'restructuredText'
 
+from contextlib import closing
 from io import BytesIO, BufferedReader
 import dulwich
 import select
@@ -247,6 +248,13 @@ class GitClient(object):
         :param progress: Callback for progress reports (strings)
         """
         raise NotImplementedError(self.fetch_pack)
+
+    def get_refs(self, path):
+        """Retrieve the current refs from a git smart server.
+
+        :param path: Path to the repo to fetch from.
+        """
+        raise NotImplementedError(self.get_refs)
 
     def _parse_status_report(self, proto):
         unpack = proto.read_pkt_line().strip()
@@ -552,6 +560,14 @@ class TraditionalGitClient(GitClient):
                 proto, negotiated_capabilities, graph_walker, pack_data, progress)
             return refs
 
+    def get_refs(self, path):
+        """Retrieve the current refs from a git smart server."""
+        # stock `git ls-remote` uses upload-pack
+        proto, _ = self._connect(b'upload-pack', path)
+        with proto:
+            refs, _ = read_pkt_refs(proto)
+            return refs
+
     def archive(self, path, committish, write_data, progress=None,
                 write_error=None):
         proto, can_read = self._connect(b'upload-archive', path)
@@ -649,6 +665,23 @@ class SubprocessWrapper(object):
         self.proc.wait()
 """
 """
+
+
+def find_git_command():
+    ""Find command to run for system Git (usually C Git).
+    ""
+    if sys.platform == 'win32': # support .exe, .bat and .cmd
+        try: # to avoid overhead
+            import win32api
+        except ImportError: # run through cmd.exe with some overhead
+            return ['cmd', '/c', 'git']
+        else:
+            status, git = win32api.FindExecutable('git')
+            return [git]
+    else:
+        return ['git']
+
+
 class SubprocessGitClient(TraditionalGitClient):
     ""Git client that talks to a server using a subprocess.""
 
@@ -660,10 +693,15 @@ class SubprocessGitClient(TraditionalGitClient):
             del kwargs['stderr']
         TraditionalGitClient.__init__(self, *args, **kwargs)
 
+    git_command = None
+
     def _connect(self, service, path):
         import subprocess
         # FIXME: path manipulation
-        argv = ['git', service, path]
+        if self.git_command is None:
+            git_command = find_git_command()
+        argv = git_command + [service, path]
+        argv = ['git', service.decode('ascii'), path]
         p = SubprocessWrapper(
             subprocess.Popen(argv, bufsize=0, stdin=subprocess.PIPE,
                              stdout=subprocess.PIPE,
@@ -703,26 +741,26 @@ class LocalGitClient(GitClient):
         """
         from dulwich.repo import Repo
 
-        target = Repo(path)
-        old_refs = target.get_refs()
-        new_refs = determine_wants(old_refs)
+        with closing(Repo(path)) as target:
+            old_refs = target.get_refs()
+            new_refs = determine_wants(dict(old_refs))
 
-        have = [sha1 for sha1 in old_refs.values() if sha1 != ZERO_SHA]
-        want = []
-        all_refs = set(new_refs.keys()).union(set(old_refs.keys()))
-        for refname in all_refs:
-            old_sha1 = old_refs.get(refname, ZERO_SHA)
-            new_sha1 = new_refs.get(refname, ZERO_SHA)
-            if new_sha1 not in have and new_sha1 != ZERO_SHA:
-                want.append(new_sha1)
+            have = [sha1 for sha1 in old_refs.values() if sha1 != ZERO_SHA]
+            want = []
+            all_refs = set(new_refs.keys()).union(set(old_refs.keys()))
+            for refname in all_refs:
+                old_sha1 = old_refs.get(refname, ZERO_SHA)
+                new_sha1 = new_refs.get(refname, ZERO_SHA)
+                if new_sha1 not in have and new_sha1 != ZERO_SHA:
+                    want.append(new_sha1)
 
-        if not want and old_refs == new_refs:
-            return new_refs
+            if not want and old_refs == new_refs:
+                return new_refs
 
-        target.object_store.add_objects(generate_pack_contents(have, want))
+            target.object_store.add_objects(generate_pack_contents(have, want))
 
-        for name, sha in new_refs.items():
-            target.refs[name] = sha
+            for name, sha in new_refs.items():
+                target.refs[name] = sha
 
         return new_refs
 
@@ -737,9 +775,9 @@ class LocalGitClient(GitClient):
         :return: remote refs as dictionary
         """
         from dulwich.repo import Repo
-        r = Repo(path)
-        return r.fetch(target, determine_wants=determine_wants,
-                       progress=progress)
+        with closing(Repo(path)) as r:
+            return r.fetch(target, determine_wants=determine_wants,
+                           progress=progress)
 
     def fetch_pack(self, path, determine_wants, graph_walker, pack_data,
                    progress=None):
@@ -751,14 +789,21 @@ class LocalGitClient(GitClient):
         :param progress: Callback for progress reports (strings)
         """
         from dulwich.repo import Repo
-        r = Repo(path)
-        objects_iter = r.fetch_objects(determine_wants, graph_walker, progress)
+        with closing(Repo(path)) as r:
+            objects_iter = r.fetch_objects(determine_wants, graph_walker, progress)
 
-        # Did the process short-circuit (e.g. in a stateless RPC call)? Note
-        # that the client still expects a 0-object pack in most cases.
-        if objects_iter is None:
-            return
-        write_pack_objects(ProtocolFile(None, pack_data), objects_iter)
+            # Did the process short-circuit (e.g. in a stateless RPC call)? Note
+            # that the client still expects a 0-object pack in most cases.
+            if objects_iter is None:
+                return
+            write_pack_objects(ProtocolFile(None, pack_data), objects_iter)
+
+    def get_refs(self, path):
+        """Retrieve the current refs from a git smart server."""
+        from dulwich.repo import Repo
+
+        with closing(Repo(path)) as target:
+            return target.get_refs()
 
 
 # What Git client to use for local access
@@ -930,13 +975,14 @@ class SSHGitClient(TraditionalGitClient):
         self.alternative_paths = {}
 
     def _get_cmd_path(self, cmd):
-        return self.alternative_paths.get(cmd, b'git-' + cmd)
+        cmd = cmd.decode('ascii')
+        return self.alternative_paths.get(cmd, 'git-' + cmd)
 
     def _connect(self, cmd, path):
-        if path.startswith(b"/~"):
+        if path.startswith("/~"):
             path = path[1:]
         con = get_ssh_vendor().run_command(
-            self.host, [self._get_cmd_path(cmd) + b" '" + path + b"'"],
+            self.host, [self._get_cmd_path(cmd), path],
             port=self.port, username=self.username)
         return (Protocol(con.read, con.write, con.close,
                          report_activity=self._report_activity),
@@ -982,6 +1028,9 @@ class HttpGitClient(GitClient):
         else:
             self.opener = opener
         GitClient.__init__(self, *args, **kwargs)
+
+    def __repr__(self):
+        return "%s(%r, dumb=%r)" % (type(self).__name__, self.base_url, self.dumb)
 
     def _get_url(self, path):
         return urlparse.urljoin(self.base_url, path).rstrip("/") + "/"
@@ -1113,6 +1162,13 @@ class HttpGitClient(GitClient):
             return refs
         finally:
             resp.close()
+
+    def get_refs(self, path):
+        """Retrieve the current refs from a git smart server."""
+        url = self._get_url(path)
+        refs, _ = self._discover_references(
+            b"git-upload-pack", url)
+        return refs
 
 
 def get_transport_and_path_from_url(url, config=None, **kwargs):

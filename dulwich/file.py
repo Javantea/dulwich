@@ -19,9 +19,10 @@
 """Safe access to git files."""
 
 import errno
-import os
-import tempfile
 import io
+import os
+import sys
+import tempfile
 
 def ensure_dir_exists(dirname):
     """Ensure a directory exists, creating if necessary."""
@@ -32,7 +33,7 @@ def ensure_dir_exists(dirname):
             raise
 
 
-def fancy_rename(oldname, newname):
+def _fancy_rename(oldname, newname):
     """Rename file with temporary backup file to rollback if rename fails"""
     if not os.path.exists(newname):
         try:
@@ -104,7 +105,7 @@ class _GitFile(object):
                      'truncate', 'write', 'writelines')
     def __init__(self, filename, mode, bufsize):
         self._filename = filename
-        self._lockfilename = self._filename + b'.lock'
+        self._lockfilename = '%s.lock' % self._filename
         fd = os.open(self._lockfilename,
             os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0))
         self._file = os.fdopen(fd, mode, bufsize)
@@ -148,10 +149,11 @@ class _GitFile(object):
             try:
                 os.rename(self._lockfilename, self._filename)
             except OSError as e:
-                # Windows versions prior to Vista don't support atomic renames
-                if e.errno != errno.EEXIST:
+                if sys.platform == 'win32' and e.errno == errno.EEXIST:
+                    # Windows versions prior to Vista don't support atomic renames
+                    _fancy_rename(self._lockfilename, self._filename)
+                else:
                     raise
-                fancy_rename(self._lockfilename, self._filename)
         finally:
             self.abort()
 

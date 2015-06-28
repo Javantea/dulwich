@@ -1061,33 +1061,48 @@ class PackData(object):
 
         :return: Tuple with object type and contents.
         """
-        if type not in DELTA_TYPES:
-            return type, obj
+        # Walk down the delta chain, building a stack of deltas to reach
+        # the requested object.
+        base_offset = offset
+        base_type = type
+        base_obj = obj
+        delta_stack = []
+        while base_type in DELTA_TYPES:
+            prev_offset = base_offset
+            if get_ref is None:
+                get_ref = self.get_ref
+            if base_type == OFS_DELTA:
+                (delta_offset, delta) = base_obj
+                # TODO: clean up asserts and replace with nicer error messages
+                assert (
+                    isinstance(base_offset, int)
+                    or isinstance(base_offset, long))
+                assert (
+                    isinstance(delta_offset, int)
+                    or isinstance(base_offset, long))
+                base_offset = base_offset - delta_offset
+                base_type, base_obj = self.get_object_at(base_offset)
+                assert isinstance(base_type, int)
+            elif base_type == REF_DELTA:
+                (basename, delta) = base_obj
+                assert isinstance(basename, bytes) and len(basename) == 20
+                base_offset, base_type, base_obj = get_ref(basename)
+                assert isinstance(base_type, int)
+            delta_stack.append((prev_offset, base_type, delta))
 
-        if get_ref is None:
-            get_ref = self.get_ref
-        if type == OFS_DELTA:
-            (delta_offset, delta) = obj
-            # TODO: clean up asserts and replace with nicer error messages
-            assert isinstance(offset, int) or isinstance(offset, long)
-            assert isinstance(delta_offset, int) or isinstance(offset, long)
-            base_offset = offset-delta_offset
-            type, base_obj = self.get_object_at(base_offset)
-            assert isinstance(type, int)
-        elif type == REF_DELTA:
-            (basename, delta) = obj
-            assert isinstance(basename, bytes) and len(basename) == 20
-            base_offset, type, base_obj = get_ref(basename)
-            assert isinstance(type, int)
-        type, base_chunks = self.resolve_object(base_offset, type, base_obj)
-        chunks = apply_delta(base_chunks, delta)
-        # TODO(dborowitz): This can result in poor performance if large base
-        # objects are separated from deltas in the pack. We should reorganize
-        # so that we apply deltas to all objects in a chain one after the other
-        # to optimize cache performance.
-        if offset is not None:
-            self._offset_cache[offset] = type, chunks
-        return type, chunks
+        # Now grab the base object (mustn't be a delta) and apply the
+        # deltas all the way up the stack.
+        chunks = base_obj
+        for prev_offset, delta_type, delta in reversed(delta_stack):
+            chunks = apply_delta(chunks, delta)
+            # TODO(dborowitz): This can result in poor performance if
+            # large base objects are separated from deltas in the pack.
+            # We should reorganize so that we apply deltas to all
+            # objects in a chain one after the other to optimize cache
+            # performance.
+            if prev_offset is not None:
+                self._offset_cache[prev_offset] = base_type, chunks
+        return base_type, chunks
 
     def iterobjects(self, progress=None, compute_crc32=True):
         self._file.seek(self._header_size)
@@ -1322,15 +1337,16 @@ class DeltaChainIterator(object):
     def _follow_chain(self, offset, obj_type_num, base_chunks):
         # Unlike PackData.get_object_at, there is no need to cache offsets as
         # this approach by design inflates each object exactly once.
-        unpacked = self._resolve_object(offset, obj_type_num, base_chunks)
-        yield self._result(unpacked)
+        todo = [(offset, obj_type_num, base_chunks)]
+        for offset, obj_type_num, base_chunks in todo:
+            unpacked = self._resolve_object(offset, obj_type_num, base_chunks)
+            yield self._result(unpacked)
 
-        pending = chain(self._pending_ofs.pop(unpacked.offset, []),
-                        self._pending_ref.pop(unpacked.sha(), []))
-        for new_offset in pending:
-            for new_result in self._follow_chain(
-              new_offset, unpacked.obj_type_num, unpacked.obj_chunks):
-                yield new_result
+            unblocked = chain(self._pending_ofs.pop(unpacked.offset, []),
+                              self._pending_ref.pop(unpacked.sha(), []))
+            todo.extend(
+                (new_offset, unpacked.obj_type_num, unpacked.obj_chunks)
+                for new_offset in unblocked)
 
     def __iter__(self):
         return self._walk_all_chains()
@@ -1474,12 +1490,12 @@ def write_pack(filename, objects, deltify=None, delta_window_size=None):
     :param deltify: Whether to deltify pack objects
     :return: Tuple with checksum of pack file and index file
     """
-    with GitFile(filename + b'.pack', 'wb') as f:
+    with GitFile(filename + '.pack', 'wb') as f:
         entries, data_sum = write_pack_objects(f, objects,
             delta_window_size=delta_window_size, deltify=deltify)
     entries = [(k, v[0], v[1]) for (k, v) in entries.items()]
     entries.sort()
-    with GitFile(filename + b'.idx', 'wb') as f:
+    with GitFile(filename + '.idx', 'wb') as f:
         return data_sum, write_pack_index_v2(f, entries, data_sum)
 
 
@@ -1785,8 +1801,8 @@ class Pack(object):
         self._basename = basename
         self._data = None
         self._idx = None
-        self._idx_path = self._basename + b'.idx'
-        self._data_path = self._basename + b'.pack'
+        self._idx_path = self._basename + '.idx'
+        self._data_path = self._basename + '.pack'
         self._data_load = lambda: PackData(self._data_path)
         self._idx_load = lambda: load_pack_index(self._idx_path)
         self.resolve_ext_ref = resolve_ext_ref
@@ -1795,7 +1811,7 @@ class Pack(object):
     def from_lazy_objects(self, data_fn, idx_fn):
         """Create a new pack object from callables to load pack data and
         index objects."""
-        ret = Pack(b'')
+        ret = Pack('')
         ret._data_load = data_fn
         ret._idx_load = idx_fn
         return ret
@@ -1803,7 +1819,7 @@ class Pack(object):
     @classmethod
     def from_objects(self, data, idx):
         """Create a new pack object from pack data and index objects."""
-        ret = Pack(b'')
+        ret = Pack('')
         ret._data_load = lambda: data
         ret._idx_load = lambda: idx
         return ret
@@ -1930,7 +1946,7 @@ class Pack(object):
                     determine whether or not a .keep file is obsolete.
         :return: The path of the .keep file, as a string.
         """
-        keepfile_name = self._basename + b'.keep'
+        keepfile_name = '%s.keep' % self._basename
         with GitFile(keepfile_name, 'wb') as keepfile:
             if msg:
                 keepfile.write(msg)
