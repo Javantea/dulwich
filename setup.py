@@ -1,6 +1,6 @@
 #!/usr/bin/python
 # Setup file for dulwich
-# Copyright (C) 2008-2011 Jelmer Vernooij <jelmer@samba.org>
+# Copyright (C) 2008-2011 Jelmer Vernooij <jelmer@jelmer.uk>
 
 try:
     from setuptools import setup, Extension
@@ -47,9 +47,10 @@ if sys.platform == 'darwin' and os.path.exists('/usr/bin/xcodebuild'):
             os.environ['ARCHFLAGS'] = ''
 
 if sys.version_info[0] == 2:
-    tests_require = ['fastimport', 'mock']
+    tests_require = ['fastimport']
     if not '__pypy__' in sys.modules and not sys.platform == 'win32':
-        tests_require.extend(['gevent', 'geventhttpclient'])
+        tests_require.extend([
+            'gevent', 'geventhttpclient', 'mock', 'setuptools>=17.1'])
     if sys.version_info < (2, 7):
         tests_require.append('unittest2')
 else:
@@ -75,10 +76,10 @@ setup(name='dulwich',
       description='Python Git Library',
       keywords='git',
       version=dulwich_version_string,
-      url='https://samba.org/~jelmer/dulwich',
+      url='https://www.dulwich.io/',
       license='GPLv2 or later',
       author='Jelmer Vernooij',
-      author_email='jelmer@samba.org',
+      author_email='jelmer@jelmer.uk',
       long_description="""
       Python implementation of the Git file formats and protocols,
       without the need to have git installed.
