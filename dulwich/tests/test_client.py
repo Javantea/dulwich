@@ -23,6 +23,7 @@ import shutil
 import tempfile
 
 
+import dulwich
 from dulwich import (
     client,
     )
@@ -87,10 +88,13 @@ class GitClientTests(TestCase):
                                   self.rout.write)
 
     def test_caps(self):
+        agent_cap = ('agent=dulwich/%d.%d.%d' % dulwich.__version__).encode('ascii')
         self.assertEqual(set([b'multi_ack', b'side-band-64k', b'ofs-delta',
-                               b'thin-pack', b'multi_ack_detailed']),
+                               b'thin-pack', b'multi_ack_detailed',
+                               agent_cap]),
                           set(self.client._fetch_capabilities))
-        self.assertEqual(set([b'ofs-delta', b'report-status', b'side-band-64k']),
+        self.assertEqual(set([b'ofs-delta', b'report-status', b'side-band-64k',
+                              agent_cap]),
                           set(self.client._send_capabilities))
 
     def test_archive_ack(self):
@@ -498,6 +502,10 @@ class TestSSHVendor(object):
         self.port = None
 
     def run_command(self, host, command, username=None, port=None):
+        if (type(command) is not list or
+            not all([isinstance(b, bytes) for b in command])):
+            raise TypeError(command)
+
         self.host = host
         self.command = command
         self.username = username
@@ -527,13 +535,19 @@ class SSHGitClientTests(TestCase):
         client.get_ssh_vendor = self.real_vendor
 
     def test_default_command(self):
-        self.assertEqual('git-upload-pack',
+        self.assertEqual([b'git-upload-pack'],
                 self.client._get_cmd_path(b'upload-pack'))
 
     def test_alternative_command_path(self):
-        self.client.alternative_paths['upload-pack'] = (
-            '/usr/lib/git/git-upload-pack')
-        self.assertEqual('/usr/lib/git/git-upload-pack',
+        self.client.alternative_paths[b'upload-pack'] = (
+            b'/usr/lib/git/git-upload-pack')
+        self.assertEqual([b'/usr/lib/git/git-upload-pack'],
+            self.client._get_cmd_path(b'upload-pack'))
+
+    def test_alternative_command_path_spaces(self):
+        self.client.alternative_paths[b'upload-pack'] = (
+            b'/usr/lib/git/git-upload-pack -ibla')
+        self.assertEqual([b'/usr/lib/git/git-upload-pack', b'-ibla'],
             self.client._get_cmd_path(b'upload-pack'))
 
     def test_connect(self):
@@ -543,13 +557,13 @@ class SSHGitClientTests(TestCase):
         client.username = b"username"
         client.port = 1337
 
-        client._connect(b"command", "/path/to/repo")
+        client._connect(b"command", b"/path/to/repo")
         self.assertEqual(b"username", server.username)
         self.assertEqual(1337, server.port)
-        self.assertEqual(["git-command", "/path/to/repo"], server.command)
+        self.assertEqual([b"git-command", b"/path/to/repo"], server.command)
 
-        client._connect(b"relative-command", "/~/path/to/repo")
-        self.assertEqual(["git-relative-command",  "~/path/to/repo"],
+        client._connect(b"relative-command", b"/~/path/to/repo")
+        self.assertEqual([b"git-relative-command", b"~/path/to/repo"],
                           server.command)
 
 

@@ -25,7 +25,6 @@ from collections import namedtuple
 import os
 import posixpath
 import stat
-import sys
 import warnings
 import zlib
 from hashlib import sha1
@@ -525,6 +524,21 @@ class ShaFile(object):
         override the rich comparison methods (__le__, etc.).
         """
         return isinstance(other, ShaFile) and self.id == other.id
+
+    def __lt__(self, other):
+        if not isinstance(other, ShaFile):
+            raise TypeError
+        return self.id < other.id
+
+    def __le__(self, other):
+        if not isinstance(other, ShaFile):
+            raise TypeError
+        return self.id <= other.id
+
+    def __cmp__(self, other):
+        if not isinstance(other, ShaFile):
+            raise TypeError
+        return cmp(self.id, other.id)
 
 
 class Blob(ShaFile):

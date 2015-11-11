@@ -1,4 +1,24 @@
-0.10.2  UNRELEASED
+0.11.3	UNRELEASED
+
+0.11.2	2015-09-18
+
+ IMPROVEMENTS
+
+  * Add support for agent= capability. (Jelmer Vernooij, #298)
+
+  * Add support for quiet capability. (Jelmer Vernooij)
+
+ CHANGES
+
+  * The ParamikoSSHVendor class has been moved to
+  * dulwich.contrib.paramiko_vendor, as it's currently untested.
+    (Jelmer Vernooij, #364)
+
+0.11.1	2015-09-13
+
+ Fix-up release to exclude broken blame.py file.
+
+0.11.0	2015-09-13
 
  IMPROVEMENTS
 
@@ -15,6 +35,9 @@
   * Add `porcelain.ls_remote` and `GitClient.get_refs`.
     (Michael Edgar)
   * Add `Repo.discover` method. (B. M. Corser)
+  * Add `dulwich.objectspec.parse_refspec`. (Jelmer Vernooij)
+  * Add `porcelain.pack_objects` and `porcelain.repack`.
+    (Jelmer Vernooij)
 
  BUG FIXES
 
@@ -22,6 +45,14 @@
     'no-done' capability. (Tommy Yu, #88)
 
   * Avoid recursion limit issues resolving deltas. (William Grant, #81)
+
+  * Allow arguments in local client binary path overrides.
+    (Jelmer Vernooij)
+
+  * Fix handling of commands with arguments in paramiko SSH
+    client. (Andreas Klöckner, Jelmer Vernooij, #363)
+
+  * Fix parsing of quoted strings in configs. (Jelmer Vernooij, #305)
 
 0.10.1  2015-03-25
 

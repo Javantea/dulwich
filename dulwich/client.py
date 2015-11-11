@@ -1,6 +1,5 @@
-# client.py -- Implementation of the server side git protocols
+# client.py -- Implementation of the client side git protocols
 # Copyright (C) 2008-2013 Jelmer Vernooij <jelmer@samba.org>
-# Copyright (C) 2008 John Carr
 #
 # This program is free software; you can redistribute it and/or
 # modify it under the terms of the GNU General Public License
@@ -26,6 +25,7 @@ The Dulwich client supports the following capabilities:
  * multi_ack
  * side-band-64k
  * ofs-delta
+ * quiet
  * report-status
  * delete-refs
 
@@ -42,6 +42,7 @@ from contextlib import closing
 from io import BytesIO, BufferedReader
 import dulwich
 import select
+import shlex
 import socket
 #import subprocess
 import sys
@@ -61,10 +62,12 @@ from dulwich.errors import (
     )
 from dulwich.protocol import (
     _RBUFSIZE,
+    capability_agent,
     CAPABILITY_DELETE_REFS,
     CAPABILITY_MULTI_ACK,
     CAPABILITY_MULTI_ACK_DETAILED,
     CAPABILITY_OFS_DELTA,
+    CAPABILITY_QUIET,
     CAPABILITY_REPORT_STATUS,
     CAPABILITY_SIDE_BAND_64K,
     CAPABILITY_THIN_PACK,
@@ -92,6 +95,7 @@ from dulwich.refs import (
 def _fileno_can_read(fileno):
     """Check if a file descriptor is readable."""
     return len(select.select([fileno], [], [], 0)[0]) > 0
+
 
 COMMON_CAPABILITIES = [CAPABILITY_OFS_DELTA, CAPABILITY_SIDE_BAND_64K]
 FETCH_CAPABILITIES = ([CAPABILITY_THIN_PACK, CAPABILITY_MULTI_ACK,
@@ -183,7 +187,7 @@ class GitClient(object):
 
     """
 
-    def __init__(self, thin_packs=True, report_activity=None):
+    def __init__(self, thin_packs=True, report_activity=None, quiet=False):
         """Create a new GitClient instance.
 
         :param thin_packs: Whether or not thin packs should be retrieved
@@ -193,7 +197,11 @@ class GitClient(object):
         self._report_activity = report_activity
         self._report_status_parser = None
         self._fetch_capabilities = set(FETCH_CAPABILITIES)
+        self._fetch_capabilities.add(capability_agent())
         self._send_capabilities = set(SEND_CAPABILITIES)
+        self._send_capabilities.add(capability_agent())
+        if quiet:
+            self._send_capabilities.add(CAPABILITY_QUIET)
         if not thin_packs:
             self._fetch_capabilities.remove(CAPABILITY_THIN_PACK)
 
@@ -201,7 +209,7 @@ class GitClient(object):
                   progress=None, write_pack=write_pack_objects):
         """Upload a pack to a remote repository.
 
-        :param path: Repository path
+        :param path: Repository path (as bytestring)
         :param generate_pack_contents: Function that can return a sequence of
             the shas of the objects to upload.
         :param progress: Optional progress function
@@ -217,7 +225,7 @@ class GitClient(object):
     def fetch(self, path, target, determine_wants=None, progress=None):
         """Fetch into a target repository.
 
-        :param path: Path to fetch from
+        :param path: Path to fetch from (as bytestring)
         :param target: Target repository to fetch into
         :param determine_wants: Optional function to determine what refs
             to fetch
@@ -226,6 +234,7 @@ class GitClient(object):
         """
         if determine_wants is None:
             determine_wants = target.object_store.determine_wants_all
+
         f, commit, abort = target.object_store.add_pack()
         try:
             result = self.fetch_pack(
@@ -252,7 +261,7 @@ class GitClient(object):
     def get_refs(self, path):
         """Retrieve the current refs from a git smart server.
 
-        :param path: Path to the repo to fetch from.
+        :param path: Path to the repo to fetch from. (as bytestring)
         """
         raise NotImplementedError(self.get_refs)
 
@@ -452,7 +461,7 @@ class TraditionalGitClient(GitClient):
         reads would block.
 
         :param cmd: The git service name to which we should connect.
-        :param path: The path we should pass to the service.
+        :param path: The path we should pass to the service. (as bytestirng)
         """
         raise NotImplementedError()
 
@@ -460,7 +469,7 @@ class TraditionalGitClient(GitClient):
                   progress=None, write_pack=write_pack_objects):
         """Upload a pack to a remote repository.
 
-        :param path: Repository path
+        :param path: Repository path (as bytestring)
         :param generate_pack_contents: Function that can return a sequence of
             the shas of the objects to upload.
         :param progress: Optional callback called with progress updates
@@ -595,14 +604,18 @@ class TraditionalGitClient(GitClient):
 class TCPGitClient(TraditionalGitClient):
     """A Git Client that works over TCP directly (i.e. git://)."""
 
-    def __init__(self, host, port=None, *args, **kwargs):
+    def __init__(self, host, port=None, **kwargs):
         if port is None:
             port = TCP_GIT_PORT
         self._host = host
         self._port = port
-        TraditionalGitClient.__init__(self, *args, **kwargs)
+        TraditionalGitClient.__init__(self, **kwargs)
 
     def _connect(self, cmd, path):
+        if type(cmd) is not bytes:
+            raise TypeError(path)
+        if type(path) is not bytes:
+            raise TypeError(path)
         sockaddrs = socket.getaddrinfo(
             self._host, self._port, socket.AF_UNSPEC, socket.SOCK_STREAM)
         s = None
@@ -632,7 +645,8 @@ class TCPGitClient(TraditionalGitClient):
                          report_activity=self._report_activity)
         if path.startswith(b"/~"):
             path = path[1:]
-        proto.send_cmd(b'git-' + cmd, path, b'host=' + self._host)
+        # TODO(jelmer): Alternative to ascii?
+        proto.send_cmd(b'git-' + cmd, path, b'host=' + self._host.encode('ascii'))
         return proto, lambda: _fileno_can_read(s)
 
 """
@@ -685,19 +699,22 @@ def find_git_command():
 class SubprocessGitClient(TraditionalGitClient):
     ""Git client that talks to a server using a subprocess.""
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, **kwargs):
         self._connection = None
         self._stderr = None
         self._stderr = kwargs.get('stderr')
         if 'stderr' in kwargs:
             del kwargs['stderr']
-        TraditionalGitClient.__init__(self, *args, **kwargs)
+        TraditionalGitClient.__init__(self, **kwargs)
 
     git_command = None
 
     def _connect(self, service, path):
-        import subprocess
         # FIXME: path manipulation
+        if type(service) is not bytes:
+            raise TypeError(path)
+        if type(path) is not bytes:
+            raise TypeError(path)
         if self.git_command is None:
             git_command = find_git_command()
         argv = git_command + [service.decode('ascii'), path]
@@ -715,7 +732,6 @@ class LocalGitClient(GitClient):
     def __init__(self, thin_packs=True, report_activity=None):
         """Create a new LocalGitClient instance.
 
-        :param path: Path to the local repository
         :param thin_packs: Whether or not thin packs should be retrieved
         :param report_activity: Optional callback for reporting transport
             activity.
@@ -727,7 +743,7 @@ class LocalGitClient(GitClient):
                   progress=None, write_pack=write_pack_objects):
         """Upload a pack to a remote repository.
 
-        :param path: Repository path
+        :param path: Repository path (as bytestring)
         :param generate_pack_contents: Function that can return a sequence of
             the shas of the objects to upload.
         :param progress: Optional progress function
@@ -766,7 +782,7 @@ class LocalGitClient(GitClient):
     def fetch(self, path, target, determine_wants=None, progress=None):
         """Fetch into a target repository.
 
-        :param path: Path to fetch from
+        :param path: Path to fetch from (as bytestring)
         :param target: Target repository to fetch into
         :param determine_wants: Optional function to determine what refs
             to fetch
@@ -826,7 +842,7 @@ class SSHVendor(object):
         with the remote command.
 
         :param host: Host name
-        :param command: Command to run
+        :param command: Command to run (as argv array)
         :param username: Optional ame of user to log in as
         :param port: Optional SSH port to use
         """
@@ -837,7 +853,10 @@ class SubprocessSSHVendor(SSHVendor):
     ""SSH vendor that shells out to the local 'ssh' command.""
 
     def run_command(self, host, command, username=None, port=None):
-        import subprocess
+        if (type(command) is not list or
+            not all([isinstance(b, bytes) for b in command])):
+            raise TypeError(command)
+
         #FIXME: This has no way to deal with passwords..
         args = ['ssh', '-x']
         if port is not None:
@@ -851,114 +870,13 @@ class SubprocessSSHVendor(SSHVendor):
         return SubprocessWrapper(proc)
 
 
-try:
-    import paramiko
-except ImportError:
-    pass
-else:
-    import threading
-
-    class ParamikoWrapper(object):
-        STDERR_READ_N = 2048  # 2k
-
-        def __init__(self, client, channel, progress_stderr=None):
-            self.client = client
-            self.channel = channel
-            self.progress_stderr = progress_stderr
-            self.should_monitor = bool(progress_stderr) or True
-            self.monitor_thread = None
-            self.stderr = ''
-
-            # Channel must block
-            self.channel.setblocking(True)
-
-            # Start
-            if self.should_monitor:
-                self.monitor_thread = threading.Thread(
-                    target=self.monitor_stderr)
-                self.monitor_thread.start()
-
-        def monitor_stderr(self):
-            while self.should_monitor:
-                # Block and read
-                data = self.read_stderr(self.STDERR_READ_N)
-
-                # Socket closed
-                if not data:
-                    self.should_monitor = False
-                    break
-
-                # Emit data
-                if self.progress_stderr:
-                    self.progress_stderr(data)
-
-                # Append to buffer
-                self.stderr += data
-
-        def stop_monitoring(self):
-            # Stop StdErr thread
-            if self.should_monitor:
-                self.should_monitor = False
-                self.monitor_thread.join()
-
-                # Get left over data
-                data = self.channel.in_stderr_buffer.empty()
-                self.stderr += data
-
-        def can_read(self):
-            return self.channel.recv_ready()
-
-        def write(self, data):
-            return self.channel.sendall(data)
-
-        def read_stderr(self, n):
-            return self.channel.recv_stderr(n)
-
-        def read(self, n=None):
-            data = self.channel.recv(n)
-            data_len = len(data)
-
-            # Closed socket
-            if not data:
-                return
-
-            # Read more if needed
-            if n and data_len < n:
-                diff_len = n - data_len
-                return data + self.read(diff_len)
-            return data
-
-        def close(self):
-            self.channel.close()
-            self.stop_monitoring()
-
-    class ParamikoSSHVendor(object):
-
-        def __init__(self):
-            self.ssh_kwargs = {}
-
-        def run_command(self, host, command, username=None, port=None,
-                        progress_stderr=None):
-
-            # Paramiko needs an explicit port. None is not valid
-            if port is None:
-                port = 22
-
-            client = paramiko.SSHClient()
-
-            policy = paramiko.client.MissingHostKeyPolicy()
-            client.set_missing_host_key_policy(policy)
-            client.connect(host, username=username, port=port,
-                           **self.ssh_kwargs)
-
-            # Open SSH session
-            channel = client.get_transport().open_session()
-
-            # Run commands
-            channel.exec_command(*command)
-
-            return ParamikoWrapper(
-                client, channel, progress_stderr=progress_stderr)
+def ParamikoSSHVendor(**kwargs):
+    import warnings
+    warnings.warn(
+        "ParamikoSSHVendor has been moved to dulwich.contrib.paramiko_vendor.",
+        DeprecationWarning)
+    from dulwich.contrib.paramiko_vendor import ParamikoSSHVendor
+    return ParamikoSSHVendor(**kwargs)
 
 
 # Can be overridden by users
@@ -966,23 +884,36 @@ get_ssh_vendor = SubprocessSSHVendor
 
 class SSHGitClient(TraditionalGitClient):
 
-    def __init__(self, host, port=None, username=None, *args, **kwargs):
+    def __init__(self, host, port=None, username=None, vendor=None, **kwargs):
         self.host = host
         self.port = port
         self.username = username
-        TraditionalGitClient.__init__(self, *args, **kwargs)
+        TraditionalGitClient.__init__(self, **kwargs)
         self.alternative_paths = {}
+        if vendor is not None:
+            self.ssh_vendor = vendor
+        else:
+            self.ssh_vendor = get_ssh_vendor()
 
     def _get_cmd_path(self, cmd):
-        cmd = cmd.decode('ascii')
-        return self.alternative_paths.get(cmd, 'git-' + cmd)
+        cmd = self.alternative_paths.get(cmd, b'git-' + cmd)
+        assert isinstance(cmd, bytes)
+        if sys.version_info[:2] <= (2, 6):
+            return shlex.split(cmd)
+        else:
+            # TODO(jelmer): Don't decode/encode here
+            return [x.encode('ascii') for x in shlex.split(cmd.decode('ascii'))]
 
     def _connect(self, cmd, path):
-        if path.startswith("/~"):
+        if type(cmd) is not bytes:
+            raise TypeError(path)
+        if type(path) is not bytes:
+            raise TypeError(path)
+        if path.startswith(b"/~"):
             path = path[1:]
-        con = get_ssh_vendor().run_command(
-            self.host, [self._get_cmd_path(cmd), path],
-            port=self.port, username=self.username)
+        argv = self._get_cmd_path(cmd) + [path]
+        con = self.ssh_vendor.run_command(
+            self.host, argv, port=self.port, username=self.username)
         return (Protocol(con.read, con.write, con.close,
                          report_activity=self._report_activity),
                 con.can_read)
@@ -1018,15 +949,14 @@ def default_urllib2_opener(config):
 
 class HttpGitClient(GitClient):
 
-    def __init__(self, base_url, dumb=None, opener=None, config=None, *args,
-                 **kwargs):
+    def __init__(self, base_url, dumb=None, opener=None, config=None, **kwargs):
         self.base_url = base_url.rstrip("/") + "/"
         self.dumb = dumb
         if opener is None:
             self.opener = default_urllib2_opener(config)
         else:
             self.opener = opener
-        GitClient.__init__(self, *args, **kwargs)
+        GitClient.__init__(self, **kwargs)
 
     def __repr__(self):
         return "%s(%r, dumb=%r)" % (type(self).__name__, self.base_url, self.dumb)
@@ -1082,7 +1012,7 @@ class HttpGitClient(GitClient):
                   progress=None, write_pack=write_pack_objects):
         """Upload a pack to a remote repository.
 
-        :param path: Repository path
+        :param path: Repository path (as bytestring)
         :param generate_pack_contents: Function that can return a sequence of
             the shas of the objects to upload.
         :param progress: Optional progress function
@@ -1173,7 +1103,7 @@ class HttpGitClient(GitClient):
 def get_transport_and_path_from_url(url, config=None, **kwargs):
     """Obtain a git client from a URL.
 
-    :param url: URL to open
+    :param url: URL to open (a unicode string)
     :param config: Optional config object
     :param thin_packs: Whether or not thin packs should be retrieved
     :param report_activity: Optional callback for reporting transport
@@ -1202,7 +1132,7 @@ def get_transport_and_path_from_url(url, config=None, **kwargs):
 def get_transport_and_path(location, **kwargs):
     """Obtain a git client from a URL.
 
-    :param location: URL or path
+    :param location: URL or path (a string)
     :param config: Optional config object
     :param thin_packs: Whether or not thin packs should be retrieved
     :param report_activity: Optional callback for reporting transport
