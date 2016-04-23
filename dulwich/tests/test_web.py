@@ -64,6 +64,30 @@ from dulwich.tests.utils import (
     )
 
 
+class MinimalistWSGIInputStream(object):
+    """WSGI input stream with no 'seek()' and 'tell()' methods."""
+    def __init__(self, data):
+        self.data = data
+        self.pos = 0
+
+    def read(self, howmuch):
+        start = self.pos
+        end = self.pos + howmuch
+        if start >= len(self.data):
+            return ''
+        self.pos = end
+        return self.data[start:end]
+
+
+class MinimalistWSGIInputStream2(MinimalistWSGIInputStream):
+    """WSGI input stream with no *working* 'seek()' and 'tell()' methods."""
+    def seek(self, pos):
+        raise NotImplementedError
+
+    def tell(self):
+        raise NotImplementedError
+
+
 class TestHTTPGitRequest(HTTPGitRequest):
     """HTTPGitRequest with overridden methods to help test caching."""
 
@@ -193,10 +217,12 @@ class DumbHandlersTestCase(WebTestCase):
         backend = _test_backend([blob])
         mat = re.search('^(..)(.{38})$', blob.id.decode('ascii'))
 
-        def as_legacy_object_error():
+        def as_legacy_object_error(self):
             raise IOError
 
-        blob.as_legacy_object = as_legacy_object_error
+        self.addCleanup(
+            setattr, Blob, 'as_legacy_object', Blob.as_legacy_object)
+        Blob.as_legacy_object = as_legacy_object_error
         list(get_loose_object(self._req, backend, mat))
         self.assertEqual(HTTP_ERROR, self._status)
 
@@ -497,19 +523,15 @@ class GunzipTestCase(HTTPGitApplicationTestCase):
         'wsgi.input' except for '.read()'.  (In particular, it shouldn't
         require '.seek()'. See https://github.com/jelmer/dulwich/issues/140.)
         """
-        class MinimalistWSGIInputStream(object):
-            def __init__(self, data):
-                self.data = data
-                self.pos = 0
-
-            def read(self, howmuch):
-                start = self.pos
-                end = self.pos + howmuch
-                if start >= len(self.data):
-                    return ''
-                self.pos = end
-                return self.data[start:end]
-
         zstream, zlength = self._get_zstream(self.example_text)
         self._test_call(self.example_text,
             MinimalistWSGIInputStream(zstream.read()), zlength)
+
+    def test_call_no_working_seek(self):
+        """
+        Similar to 'test_call_no_seek', but this time the methods are available
+        (but defunct).  See https://github.com/jonashaag/klaus/issues/154.
+        """
+        zstream, zlength = self._get_zstream(self.example_text)
+        self._test_call(self.example_text,
+            MinimalistWSGIInputStream2(zstream.read()), zlength)

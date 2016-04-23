@@ -1,9 +1,51 @@
-0.11.3	UNRELEASED
+0.13.0	UNRELEASED
+
+ IMPROVEMENTS
+
+  * Support `ssh://` URLs in get_transport_and_path_from_url().
+    (Jelmer Vernooij, #402)
+
+  * Support missing empty line after headers in Git commits and tags.
+    (Nicolas Dandrimont, #413)
+
+  * Fix `dulwich.porcelain.status` when used in empty trees.
+    (Jelmer Vernooij, #415)
+
+  * Return copies of objects in MemoryObjectStore rather than
+    references, making the behaviour more consistent with that of
+    DiskObjectStore. (Félix Mattrat, Jelmer Vernooij)
+
+ CHANGES
+
+  * Drop support for Python 2.6.
+
+  * Fix python3 client web support. (Jelmer Vernooij)
+
+ BUG FIXES
+
+  * Fix hang on Gzip decompression. (Jonas Haag)
+
+  * Don't rely on working tell() and seek() methods
+    on wsgi.input. (Jonas Haag)
+
+  * Support fastexport/fastimport functionality on python3 with newer
+    versions of fastimport (>= 0.9.5). (Jelmer Vernooij, Félix Mattrat)
+
+0.12.0	2015-12-13
 
  IMPROVEMENTS
 
   * Add a `dulwich.archive` module that can create tarballs.
     Based on code from Jonas Haag in klaus.
+
+  * Add a `dulwich.reflog` module for reading and writing reflogs.
+    (Jelmer Vernooij)
+
+  * Fix handling of ambiguous refs in `parse_ref` to make
+    it match the behaviour described in https://git-scm.com/docs/gitrevisions.
+    (Chris Bunney)
+
+  * Support Python3 in C modules. (Lele Gaifax)
 
  BUG FIXES
 
@@ -11,6 +53,9 @@
     Fixes quoting of paths. Thanks, Thomas Liebetraut. (#384)
 
   * Fix inconsistent handling of trailing slashes for DictRefsContainer. (#383)
+
+  * Add hack to support thin packs duing fetch(), albeit while requiring the
+    entire pack file to be loaded into memory. (jsbain)
 
  CHANGES
 

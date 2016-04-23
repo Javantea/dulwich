@@ -12,14 +12,10 @@ New contributions to Dulwich should be dual licensed under the GNU GPLv2 (or
 later) and the Apachev2 (or later) licenses.
 
 Contributions made prior were contributed under the GPLv2 (or later) license
-alone. The following contributors have not (yet) relicensed their code under
-dual Apachev2/GPLv2:
+alone. Code written by the following contributors has not (yet) been relicensed
+under dual Apachev2/GPLv2:
 
 Artem Tikhomirov <artem.tikhomirov@syntevo.com>
-Chris Eberle <eberle1080@gmail.com>
-Dmitriy <dkomarov@gmail.com>
-Gary van der Merwé <garyvdm@gmail.com>
-Nick Ward <ward.nickjames@gmail.com>
 Risto Kankkunen <risto.kankkunen@f-secure.com> <risto.kankkunen@iki.fi>
 
 If your name is in this list and you'd be happy to relicense your contribution

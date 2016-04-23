@@ -42,7 +42,6 @@ from contextlib import closing
 from io import BytesIO, BufferedReader
 import dulwich
 import select
-import shlex
 import socket
 #import subprocess
 import sys
@@ -230,12 +229,22 @@ class GitClient(object):
         :param determine_wants: Optional function to determine what refs
             to fetch
         :param progress: Optional progress function
-        :return: remote refs as dictionary
+        :return: Dictionary with all remote refs (not just those fetched)
         """
         if determine_wants is None:
             determine_wants = target.object_store.determine_wants_all
-
-        f, commit, abort = target.object_store.add_pack()
+        if CAPABILITY_THIN_PACK in self._fetch_capabilities:
+            # TODO(jelmer): Avoid reading entire file into memory and
+            # only processing it after the whole file has been fetched.
+            f = BytesIO()
+            def commit():
+                if f.tell():
+                    f.seek(0)
+                    target.object_store.add_thin_pack(f.read, None)
+            def abort():
+                pass
+        else:
+            f, commit, abort = target.object_store.add_pack()
         try:
             result = self.fetch_pack(
                 path, determine_wants, target.get_graph_walker(), f.write,
@@ -255,6 +264,7 @@ class GitClient(object):
         :param graph_walker: Object with next() and ack().
         :param pack_data: Callback called for each bit of data in the pack
         :param progress: Callback for progress reports (strings)
+        :return: Dictionary with all remote refs (not just those fetched)
         """
         raise NotImplementedError(self.fetch_pack)
 
@@ -542,6 +552,7 @@ class TraditionalGitClient(GitClient):
         :param graph_walker: Object with next() and ack().
         :param pack_data: Callback called for each bit of data in the pack
         :param progress: Callback for progress reports (strings)
+        :return: Dictionary with all remote refs (not just those fetched)
         """
         proto, can_read = self._connect(b'upload-pack', path)
         with proto:
@@ -787,7 +798,7 @@ class LocalGitClient(GitClient):
         :param determine_wants: Optional function to determine what refs
             to fetch
         :param progress: Optional progress function
-        :return: remote refs as dictionary
+        :return: Dictionary with all remote refs (not just those fetched)
         """
         from dulwich.repo import Repo
         with closing(Repo(path)) as r:
@@ -802,6 +813,7 @@ class LocalGitClient(GitClient):
         :param graph_walker: Object with next() and ack().
         :param pack_data: Callback called for each bit of data in the pack
         :param progress: Callback for progress reports (strings)
+        :return: Dictionary with all remote refs (not just those fetched)
         """
         from dulwich.repo import Repo
         with closing(Repo(path)) as r:
@@ -975,16 +987,21 @@ class HttpGitClient(GitClient):
         url = urlparse.urljoin(url, "info/refs")
         headers = {}
         if self.dumb is not False:
-            url += "?service=%s" % service
-            headers["Content-Type"] = "application/x-%s-request" % service
+            url += "?service=%s" % service.decode('ascii')
+            headers["Content-Type"] = "application/x-%s-request" % (
+                service.decode('ascii'))
         resp = self._http_request(url, headers)
         try:
-            self.dumb = (not resp.info().gettype().startswith("application/x-git-"))
+            content_type = resp.info().gettype()
+        except AttributeError:
+            content_type = resp.info().get_content_type()
+        try:
+            self.dumb = (not content_type.startswith("application/x-git-"))
             if not self.dumb:
                 proto = Protocol(resp.read, None)
                 # The first line should mention the service
                 pkts = list(proto.read_pkt_seq())
-                if pkts != [('# service=%s\n' % service)]:
+                if pkts != [b'# service=' + service + b'\n']:
                     raise GitProtocolError(
                         "unexpected first line %r from smart server" % pkts)
                 return read_pkt_refs(proto)
@@ -996,11 +1013,18 @@ class HttpGitClient(GitClient):
     def _smart_request(self, service, url, data):
         assert url[-1] == "/"
         url = urlparse.urljoin(url, service)
-        headers = {"Content-Type": "application/x-%s-request" % service}
+        headers = {
+            "Content-Type": "application/x-%s-request" % service
+        }
         resp = self._http_request(url, headers, data)
-        if resp.info().gettype() != ("application/x-%s-result" % service):
+        try:
+            content_type = resp.info().gettype()
+        except AttributeError:
+            content_type = resp.info().get_content_type()
+        if content_type != (
+                "application/x-%s-result" % service):
             raise GitProtocolError("Invalid content-type from server: %s"
-                % resp.info().gettype())
+                % content_type)
         return resp
 
     def send_pack(self, path, determine_wants, generate_pack_contents,
@@ -1040,7 +1064,7 @@ class HttpGitClient(GitClient):
         objects = generate_pack_contents(have, want)
         if len(objects) > 0:
             write_pack(req_proto.write_file(), objects)
-        resp = self._smart_request(b"git-receive-pack", url,
+        resp = self._smart_request("git-receive-pack", url,
                                    data=req_data.getvalue())
         try:
             resp_proto = Protocol(resp.read, None)
@@ -1059,7 +1083,7 @@ class HttpGitClient(GitClient):
         :param graph_walker: Object with next() and ack().
         :param pack_data: Callback called for each bit of data in the pack
         :param progress: Callback for progress reports (strings)
-        :return: Dictionary with the refs of the remote repository
+        :return: Dictionary with all remote refs (not just those fetched)
         """
         url = self._get_url(path)
         refs, server_capabilities = self._discover_references(
@@ -1078,7 +1102,7 @@ class HttpGitClient(GitClient):
             req_proto, negotiated_capabilities, graph_walker, wants,
             lambda: False)
         resp = self._smart_request(
-            b"git-upload-pack", url, data=req_data.getvalue())
+            "git-upload-pack", url, data=req_data.getvalue())
         try:
             resp_proto = Protocol(resp.read, None)
             self._handle_upload_pack_tail(resp_proto, negotiated_capabilities,
@@ -1109,7 +1133,7 @@ def get_transport_and_path_from_url(url, config=None, **kwargs):
     if parsed.scheme == 'git':
         return (TCPGitClient(parsed.hostname, port=parsed.port, **kwargs),
                 parsed.path)
-    elif parsed.scheme == 'git+ssh':
+    elif parsed.scheme in ('git+ssh', 'ssh'):
         path = parsed.path
         if path.startswith('/'):
             path = parsed.path[1:]
