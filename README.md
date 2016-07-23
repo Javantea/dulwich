@@ -22,7 +22,7 @@ If you don't want to install the C bindings, specify the --pure argument to setu
 
     $ python setup.py --pure install
 
-or if you are installing from pip:
+or if you are installing from pip::
 
     $ pip install dulwich --global-option="--pure"
 
@@ -46,5 +46,4 @@ https://launchpad.net/~dulwich-users.
 Supported versions of Python
 ----------------------------
 
-At the moment, Dulwich supports (and is tested on) CPython 2.6, 2.7, 3.4, 3.5 and Pypy.
-The ``dulwich.web`` module is currently broken on Python 3 (issue #295).
+At the moment, Dulwich supports (and is tested on) CPython 2.7, 3.4, 3.5 and Pypy.
