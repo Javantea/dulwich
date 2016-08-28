@@ -19,6 +19,7 @@
 """Tests for reading and writing configuration files."""
 
 from io import BytesIO
+import os
 from dulwich.config import (
     ConfigDict,
     ConfigFile,

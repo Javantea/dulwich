@@ -567,7 +567,14 @@ class DiskObjectStore(PackBasedObjectStore):
         # Move the pack in.
         entries.sort()
         pack_base_name = self._get_pack_basepath(entries)
-        os.rename(path, pack_base_name + '.pack')
+        if sys.platform == 'win32':
+            try:
+                os.rename(path, pack_base_name + '.pack')
+            except WindowsError:
+                os.remove(pack_base_name + '.pack')
+                os.rename(path, pack_base_name + '.pack')
+        else:
+            os.rename(path, pack_base_name + '.pack')
 
         # Write the index.
         index_file = GitFile(pack_base_name + '.idx', 'wb')
