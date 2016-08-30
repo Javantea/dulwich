@@ -247,6 +247,8 @@ class Walker(object):
         self._out_queue = collections.deque()
 
     def _path_matches(self, changed_path):
+        if hasattr(changed_path, 'decode'):
+            changed_path = changed_path.decode('utf-8')
         if changed_path is None:
             return False
         for followed_path in self.paths:

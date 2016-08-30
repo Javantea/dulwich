@@ -104,6 +104,9 @@ class _GitFile(object):
                      'readline', 'readlines', 'seek', 'tell',
                      'truncate', 'write', 'writelines')
     def __init__(self, filename, mode, bufsize):
+        if hasattr(filename, 'decode'):
+            filename = filename.decode('utf-8')
+        #end if
         self._filename = filename
         self._lockfilename = '%s.lock' % self._filename
         fd = os.open(self._lockfilename,

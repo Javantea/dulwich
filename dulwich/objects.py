@@ -111,7 +111,8 @@ def hex_to_filename(path, hex):
     # os.path.join accepts bytes or unicode, but all args must be of the same
     # type. Make sure that hex which is expected to be bytes, is the same type
     # as path.
-    if getattr(path, 'encode', None) is not None:
+    # FIXME: This is ugly.
+    if hasattr(hex, 'decode'):
         hex = hex.decode('ascii')
     dir = hex[:2]
     file = hex[2:]
@@ -908,6 +909,8 @@ class Tree(ShaFile):
             warnings.warn(
                 "Please use Tree.add(name, mode, hexsha)",
                 category=DeprecationWarning, stacklevel=2)
+        if isinstance(hexsha, str):
+            hexsha = hexsha.encode('ascii')
         self._entries[name] = mode, hexsha
         self._needs_serialization = True
 
