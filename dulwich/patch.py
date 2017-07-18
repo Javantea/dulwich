@@ -123,7 +123,7 @@ def shortid(hexsha):
     if hexsha is None:
         return b"0" * 7
     else:
-        return hexsha[:7].decode('ascii')
+        return hexsha[:7]#.decode('ascii')
 
 
 def patch_filename(p, root):
