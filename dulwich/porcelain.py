@@ -30,6 +30,7 @@ Currently implemented:
  * fetch
  * init
  * ls-remote
+ * ls-tree
  * pull
  * push
  * rm
@@ -54,12 +55,16 @@ from contextlib import (
     contextmanager,
 )
 import os
+import posixpath
+import stat
 import sys
 import time
 
+from dulwich.archive import (
+    tar_stream,
+    )
 from dulwich.client import (
     get_transport_and_path,
-    SubprocessGitClient,
     )
 from dulwich.errors import (
     SendPackError,
@@ -70,6 +75,7 @@ from dulwich.objects import (
     Commit,
     Tag,
     parse_timezone,
+    pretty_format_tree_entry,
     )
 from dulwich.objectspec import (
     parse_object,
@@ -80,19 +86,26 @@ from dulwich.pack import (
     write_pack_objects,
     )
 from dulwich.patch import write_tree_diff
-from dulwich.protocol import Protocol
-from dulwich.repo import (BaseRepo, Repo)
-from dulwich.server import (
-    FileSystemBackend,
-    TCPGitServer,
-    ReceivePackHandler,
-    UploadPackHandler,
-    update_server_info as server_update_server_info,
+from dulwich.protocol import (
+    Protocol,
+    ZERO_SHA,
     )
+from dulwich.repo import (BaseRepo, Repo)
+#from dulwich.server import (
+#    FileSystemBackend,
+#    TCPGitServer,
+#    ReceivePackHandler,
+#    UploadPackHandler,
+#    update_server_info as server_update_server_info,
+#    )
 
 
 # Module level tuple definition for status output
 GitStatus = namedtuple('GitStatus', 'staged unstaged untracked')
+
+
+default_bytes_out_stream = getattr(sys.stdout, 'buffer', sys.stdout)
+default_bytes_err_stream = getattr(sys.stderr, 'buffer', sys.stderr)
 
 
 def encode_path(path):
@@ -126,25 +139,24 @@ def open_repo_closing(path_or_repo):
     return closing(Repo(path_or_repo))
 
 
-def archive(path, committish=None, outstream=sys.stdout,
+def archive(repo, committish=None, outstream=sys.stdout,
             errstream=sys.stderr):
     """Create an archive.
 
-    :param path: Path of repository for which to generate an archive.
+    :param repo: Path of repository for which to generate an archive.
     :param committish: Commit SHA1 or ref to use
     :param outstream: Output stream (defaults to stdout)
     :param errstream: Error stream (defaults to stderr)
     """
 
-    client = SubprocessGitClient()
     if committish is None:
         committish = "HEAD"
-    if not isinstance(path, bytes):
-        path = path.encode(sys.getfilesystemencoding())
-    # TODO(jelmer): This invokes C git; this introduces a dependency.
-    # Instead, dulwich should have its own archiver implementation.
-    client.archive(path, committish, outstream.write, errstream.write,
-                   errstream.write)
+    with open_repo_closing(repo) as repo_obj:
+        c = repo_obj[committish]
+        tree = c.tree
+        for chunk in tar_stream(repo_obj.object_store,
+                repo_obj.object_store[c.tree], c.commit_time):
+            outstream.write(chunk)
 
 
 def update_server_info(repo="."):
@@ -215,7 +227,7 @@ def init(path=".", bare=False):
         return Repo.init(path)
 
 
-def clone(source, target=None, bare=False, checkout=None, errstream=sys.stdout, outstream=None):
+def clone(source, target=None, bare=False, checkout=None, errstream=default_bytes_err_stream, outstream=None):
     """Clone a local or remote git repository.
 
     :param source: Path or URL for source repository
@@ -484,9 +496,9 @@ def tag_create(repo, tag, author=None, message=None, annotated=False,
             tag_obj.message = message
             tag_obj.name = tag
             tag_obj.object = (type(object), object.id)
-            tag_obj.tag_time = tag_time
             if tag_time is None:
                 tag_time = int(time.time())
+            tag_obj.tag_time = tag_time
             if tag_timezone is None:
                 # TODO(jelmer) Use current user timezone rather than UTC
                 tag_timezone = 0
@@ -572,16 +584,17 @@ def push(repo, remote_location, refspecs=None,
 
         def update_refs(refs):
             selected_refs.extend(parse_reftuples(r.refs, refs, refspecs))
+            new_refs = {}
             # TODO: Handle selected_refs == {None: None}
             for (lh, rh, force) in selected_refs:
                 if lh is None:
-                    del refs[rh]
+                    new_refs[rh] = ZERO_SHA
                 else:
-                    refs[rh] = r.refs[lh]
-            return refs
+                    new_refs[rh] = r.refs[lh]
+            return new_refs
 
-        err_encoding = getattr(errstream, 'encoding', 'utf-8')
-        remote_location_bytes = remote_location.encode(err_encoding)
+        err_encoding = getattr(errstream, 'encoding', None) or 'utf-8'
+        remote_location_bytes = client.get_url(path).encode(err_encoding)
         try:
             client.send_pack(path, update_refs,
                 r.object_store.generate_pack_contents, progress=errstream.write)
@@ -658,7 +671,12 @@ def get_tree_changes(repo):
             'delete': [],
             'modify': [],
         }
-        for change in index.changes_from_tree(r.object_store, r[b'HEAD'].tree):
+        try:
+            tree_id = r[b'HEAD'].tree
+        except KeyError:
+            tree_id = None
+
+        for change in index.changes_from_tree(r.object_store, tree_id):
             if not change[0][0]:
                 tracked_changes['add'].append(change[0][1])
             elif not change[0][1]:
@@ -846,3 +864,31 @@ def pack_objects(repo, object_ids, packf, idxf, delta_window_size=None):
         entries = [(k, v[0], v[1]) for (k, v) in entries.items()]
         entries.sort()
         write_pack_index(idxf, entries, data_sum)
+
+
+def ls_tree(repo, tree_ish=None, outstream=sys.stdout, recursive=False,
+        name_only=False):
+    """List contents of a tree.
+
+    :param repo: Path to the repository
+    :param tree_ish: Tree id to list
+    :param outstream: Output stream (defaults to stdout)
+    :param recursive: Whether to recursively list files
+    :param name_only: Only print item name
+    """
+    def list_tree(store, treeid, base):
+        for (name, mode, sha) in store[treeid].iteritems():
+            if base:
+                name = posixpath.join(base, name)
+            if name_only:
+                outstream.write(name + b"\n")
+            else:
+                outstream.write(pretty_format_tree_entry(name, mode, sha))
+            if stat.S_ISDIR(mode):
+                list_tree(store, sha, name)
+    if tree_ish is None:
+        tree_ish = "HEAD"
+    with open_repo_closing(repo) as r:
+        c = r[tree_ish]
+        treeid = c.tree
+        list_tree(r.object_store, treeid, "")

@@ -58,12 +58,8 @@ from dulwich import (
     repo,
     )
 from dulwich.tests import (
-    get_safe_env,
     SkipTest,
     expectedFailure,
-    )
-from dulwich.tests.utils import (
-    skipIfPY3,
     )
 from dulwich.tests.compat.utils import (
     CompatTestCase,
@@ -271,7 +267,6 @@ class DulwichTCPClientTest(CompatTestCase, DulwichClientTestBase):
         if check_for_daemon(limit=1):
             raise SkipTest('git-daemon was already running on port %s' %
                               protocol.TCP_GIT_PORT)
-        env = get_safe_env()
         fd, self.pidfile = tempfile.mkstemp(prefix='dulwich-test-git-client',
                                             suffix=".pid")
         os.fdopen(fd).close()
@@ -282,7 +277,7 @@ class DulwichTCPClientTest(CompatTestCase, DulwichClientTestBase):
                 '--listen=localhost', '--reuseaddr',
                 self.gitroot]
         self.process = subprocess.Popen(
-            args, env=env, cwd=self.gitroot,
+            args, cwd=self.gitroot,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         if not check_for_daemon():
             raise SkipTest('git-daemon failed to start')
@@ -324,9 +319,10 @@ class TestSSHVendor(object):
 
     @staticmethod
     def run_command(host, command, username=None, port=None):
-        cmd, path = command
+        cmd, path = command.split(b' ')
         cmd = cmd.split(b'-', 1)
-        p = subprocess.Popen(cmd + [path], bufsize=0, env=get_safe_env(), stdin=subprocess.PIPE,
+        path = path.replace(b"'", b"")
+        p = subprocess.Popen(cmd + [path], bufsize=0, stdin=subprocess.PIPE,
                              stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         return client.SubprocessWrapper(p)
 
@@ -435,10 +431,7 @@ class GitHTTPRequestHandler(SimpleHTTPServer.SimpleHTTPRequestHandler):
                         if len(authorization) == 2:
                             env['REMOTE_USER'] = authorization[0]
         # XXX REMOTE_IDENT
-        if self.headers.typeheader is None:
-            env['CONTENT_TYPE'] = self.headers.type
-        else:
-            env['CONTENT_TYPE'] = self.headers.typeheader
+        env['CONTENT_TYPE'] = self.headers.get('content-type')
         length = self.headers.get('content-length')
         if length:
             env['CONTENT_LENGTH'] = length
@@ -455,9 +448,9 @@ class GitHTTPRequestHandler(SimpleHTTPServer.SimpleHTTPRequestHandler):
         ua = self.headers.get('user-agent')
         if ua:
             env['HTTP_USER_AGENT'] = ua
-        co = filter(None, self.headers.getheaders('cookie'))
+        co = self.headers.get('cookie')
         if co:
-            env['HTTP_COOKIE'] = ', '.join(co)
+            env['HTTP_COOKIE'] = co
         # XXX Other HTTP_* headers
         # Since we're setting the env in the parent, provide empty
         # values to override previously set values
@@ -465,7 +458,11 @@ class GitHTTPRequestHandler(SimpleHTTPServer.SimpleHTTPRequestHandler):
                   'HTTP_USER_AGENT', 'HTTP_COOKIE', 'HTTP_REFERER'):
             env.setdefault(k, "")
 
-        self.send_response(200, "Script output follows")
+        self.wfile.write(b"HTTP/1.1 200 Script output follows\r\n")
+        self.wfile.write(
+            ("Server: %s\r\n" % self.server.server_name).encode('ascii'))
+        self.wfile.write(
+            ("Date: %s\r\n" % self.date_time_string()).encode('ascii'))
 
         decoded_query = query.replace('+', ' ')
 
@@ -501,7 +498,6 @@ class HTTPGitServer(BaseHTTPServer.HTTPServer):
         return 'http://%s:%s/' % (self.server_name, self.server_port)
 
 
-@skipIfPY3
 class DulwichHttpClientTest(CompatTestCase, DulwichClientTestBase):
 
     min_git_version = (1, 7, 0, 2)
@@ -527,7 +523,10 @@ class DulwichHttpClientTest(CompatTestCase, DulwichClientTestBase):
         return client.HttpGitClient(self._httpd.get_url())
 
     def _build_path(self, path):
-        return path
+        if sys.version_info[0] == 3:
+            return path.decode('ascii')
+        else:
+            return path
 
     def test_archive(self):
         raise SkipTest("exporting archives not supported over http")

@@ -32,6 +32,7 @@ from dulwich.errors import (
 from dulwich.objects import (
     git_line,
     valid_hexsha,
+    ZERO_SHA,
     )
 from dulwich.file import (
     GitFile,
@@ -149,6 +150,8 @@ class RefsContainer(object):
         keys = self.keys(base)
         if base is None:
             base = b''
+        else:
+            base = base.rstrip(b'/')
         for key in keys:
             try:
                 ret[key] = self[(base + b'/' + key).strip(b'/')]
@@ -194,23 +197,35 @@ class RefsContainer(object):
         """
         raise NotImplementedError(self.read_loose_ref)
 
-    def _follow(self, name):
+    def follow(self, name):
         """Follow a reference name.
 
-        :return: a tuple of (refname, sha), where refname is the name of the
-            last reference in the symbolic reference chain
+        :return: a tuple of (refnames, sha), wheres refnames are the names of
+            references in the chain
         """
         contents = SYMREF + name
         depth = 0
+        refnames = []
         while contents.startswith(SYMREF):
             refname = contents[len(SYMREF):]
+            refnames.append(refname)
             contents = self.read_ref(refname)
             if not contents:
                 break
             depth += 1
             if depth > 5:
                 raise KeyError(name)
-        return refname, contents
+        return refnames, contents
+
+    def _follow(self, name):
+        import warnings
+        warnings.warn(
+            "RefsContainer._follow is deprecated. Use RefsContainer.follow instead.",
+            DeprecationWarning)
+        refnames, contents = self.follow(name)
+        if not refnames:
+            return (None, contents)
+        return (refnames[-1], contents)
 
     def __contains__(self, refname):
         if self.read_ref(refname):
@@ -222,7 +237,7 @@ class RefsContainer(object):
 
         This method follows all symbolic references.
         """
-        _, sha = self._follow(name)
+        _, sha = self.follow(name)
         if sha is None:
             raise KeyError(name)
         return sha
@@ -313,11 +328,12 @@ class DictRefsContainer(RefsContainer):
         self._refs[name] = SYMREF + other
 
     def set_if_equals(self, name, old_ref, new_ref):
-        if old_ref is not None and self._refs.get(name, None) != old_ref:
+        if old_ref is not None and self._refs.get(name, ZERO_SHA) != old_ref:
             return False
-        realname, _ = self._follow(name)
-        self._check_refname(realname)
-        self._refs[realname] = new_ref
+        realnames, _ = self.follow(name)
+        for realname in realnames:
+            self._check_refname(realname)
+            self._refs[realname] = new_ref
         return True
 
     def add_if_new(self, name, ref):
@@ -327,9 +343,12 @@ class DictRefsContainer(RefsContainer):
         return True
 
     def remove_if_equals(self, name, old_ref):
-        if old_ref is not None and self._refs.get(name, None) != old_ref:
+        if old_ref is not None and self._refs.get(name, ZERO_SHA) != old_ref:
             return False
-        del self._refs[name]
+        try:
+            del self._refs[name]
+        except KeyError:
+            pass
         return True
 
     def get_peeled(self, name):
@@ -502,10 +521,11 @@ class DiskRefsContainer(RefsContainer):
                 header = f.read(len(SYMREF))
                 if header == SYMREF:
                     # Read only the first line
-                    return header + next(iter(f)).rstrip(b'\r\n')
+                    return header + next(iter(f)).rstrip(b'\r\n').rstrip(b'\n')
                 else:
+                    # FIXME: This doesn't make sense.
                     # Read only the first 40 bytes
-                    return header + f.read(40 - len(SYMREF))
+                    return header + f.read(40 - len(SYMREF)).rstrip(b'\r\n').rstrip(b'\n')
         except IOError as e:
             if e.errno == errno.ENOENT:
                 return None
@@ -565,8 +585,9 @@ class DiskRefsContainer(RefsContainer):
         """
         self._check_refname(name)
         try:
-            realname, _ = self._follow(name)
-        except KeyError:
+            realnames, _ = self.follow(name)
+            realname = realnames[-1]
+        except (KeyError, IndexError):
             realname = name
         filename = self.refpath(realname)
         ensure_dir_exists(os.path.dirname(filename))
@@ -576,7 +597,7 @@ class DiskRefsContainer(RefsContainer):
                     # read again while holding the lock
                     orig_ref = self.read_loose_ref(realname)
                     if orig_ref is None:
-                        orig_ref = self.get_packed_refs().get(realname, None)
+                        orig_ref = self.get_packed_refs().get(realname, ZERO_SHA)
                     if orig_ref != old_ref:
                         f.abort()
                         return False
@@ -601,10 +622,11 @@ class DiskRefsContainer(RefsContainer):
         :return: True if the add was successful, False otherwise.
         """
         try:
-            realname, contents = self._follow(name)
+            realnames, contents = self.follow(name)
             if contents is not None:
                 return False
-        except KeyError:
+            realname = realnames[-1]
+        except (KeyError, IndexError):
             realname = name
         self._check_refname(realname)
         filename = self.refpath(realname)
@@ -639,7 +661,7 @@ class DiskRefsContainer(RefsContainer):
             if old_ref is not None:
                 orig_ref = self.read_loose_ref(name)
                 if orig_ref is None:
-                    orig_ref = self.get_packed_refs().get(name, None)
+                    orig_ref = self.get_packed_refs().get(name, ZERO_SHA)
                 if orig_ref != old_ref:
                     return False
             # may only be packed
@@ -735,7 +757,7 @@ def write_packed_refs(f, packed_refs, peeled_refs=None):
 def read_info_refs(f):
     ret = {}
     for l in f.readlines():
-        (sha, name) = l.rstrip("\r\n").split("\t", 1)
+        (sha, name) = l.rstrip(b"\r\n").split(b"\t", 1)
         ret[name] = sha
     return ret
 

@@ -1,6 +1,7 @@
 #!/usr/bin/python
+# encoding: utf-8
 # Setup file for dulwich
-# Copyright (C) 2008-2011 Jelmer Vernooij <jelmer@jelmer.uk>
+# Copyright (C) 2008-2016 Jelmer Vernooĳ <jelmer@jelmer.uk>
 
 try:
     from setuptools import setup, Extension
@@ -8,7 +9,7 @@ except ImportError:
     from distutils.core import setup, Extension
 from distutils.core import Distribution
 
-dulwich_version_string = '0.11.2'
+dulwich_version_string = '0.15.0'
 
 include_dirs = []
 # Windows MSVC support
@@ -46,17 +47,10 @@ if sys.platform == 'darwin' and os.path.exists('/usr/bin/xcodebuild'):
         if l.startswith('Xcode') and int(l.split()[1].split('.')[0]) >= 4:
             os.environ['ARCHFLAGS'] = ''
 
-if sys.version_info[0] == 2:
-    tests_require = ['fastimport']
-    if not '__pypy__' in sys.modules and not sys.platform == 'win32':
-        tests_require.extend([
-            'gevent', 'geventhttpclient', 'mock', 'setuptools>=17.1'])
-    if sys.version_info < (2, 7):
-        tests_require.append('unittest2')
-else:
-    # fastimport, gevent, geventhttpclient are not available for PY3
-    # mock only used for test_swift, which requires gevent/geventhttpclient
-    tests_require = []
+tests_require = ['fastimport']
+if not '__pypy__' in sys.modules and not sys.platform == 'win32':
+    tests_require.extend([
+        'gevent', 'geventhttpclient', 'mock', 'setuptools>=17.1'])
 
 if sys.version_info[0] > 2 and sys.platform == 'win32':
     # C Modules don't build for python3 windows, and prevent tests from running
@@ -77,8 +71,8 @@ setup(name='dulwich',
       keywords='git',
       version=dulwich_version_string,
       url='https://www.dulwich.io/',
-      license='GPLv2 or later',
-      author='Jelmer Vernooij',
+      license='Apachev2 or later or GPLv2',
+      author='Jelmer Vernooĳ',
       author_email='jelmer@jelmer.uk',
       long_description="""
       Python implementation of the Git file formats and protocols,
@@ -95,10 +89,10 @@ setup(name='dulwich',
       scripts=['bin/dulwich', 'bin/dul-receive-pack', 'bin/dul-upload-pack'],
       classifiers=[
           'Development Status :: 4 - Beta',
-          'License :: OSI Approved :: GNU General Public License v2 or later (GPLv2+)',
-          'Programming Language :: Python :: 2.6',
+          'License :: OSI Approved :: Apache Software License'
           'Programming Language :: Python :: 2.7',
           'Programming Language :: Python :: 3.4',
+          'Programming Language :: Python :: 3.5',
           'Programming Language :: Python :: Implementation :: CPython',
           'Programming Language :: Python :: Implementation :: PyPy',
           'Operating System :: POSIX',

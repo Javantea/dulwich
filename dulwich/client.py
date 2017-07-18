@@ -1,6 +1,5 @@
-# client.py -- Implementation of the server side git protocols
+# client.py -- Implementation of the client side git protocols
 # Copyright (C) 2008-2013 Jelmer Vernooij <jelmer@samba.org>
-# Copyright (C) 2008 John Carr
 #
 # This program is free software; you can redistribute it and/or
 # modify it under the terms of the GNU General Public License
@@ -26,6 +25,7 @@ The Dulwich client supports the following capabilities:
  * multi_ack
  * side-band-64k
  * ofs-delta
+ * quiet
  * report-status
  * delete-refs
 
@@ -42,10 +42,14 @@ from contextlib import closing
 from io import BytesIO, BufferedReader
 import dulwich
 import select
-import shlex
 import socket
-import subprocess
+#import subprocess
 import sys
+
+try:
+    from urllib import quote as urlquote
+except ImportError:
+    from urllib.parse import quote as urlquote
 
 try:
     import urllib2
@@ -62,13 +66,16 @@ from dulwich.errors import (
     )
 from dulwich.protocol import (
     _RBUFSIZE,
+    capability_agent,
     CAPABILITY_DELETE_REFS,
     CAPABILITY_MULTI_ACK,
     CAPABILITY_MULTI_ACK_DETAILED,
     CAPABILITY_OFS_DELTA,
+    CAPABILITY_QUIET,
     CAPABILITY_REPORT_STATUS,
     CAPABILITY_SIDE_BAND_64K,
     CAPABILITY_THIN_PACK,
+    CAPABILITIES_REF,
     COMMAND_DONE,
     COMMAND_HAVE,
     COMMAND_WANT,
@@ -93,6 +100,7 @@ from dulwich.refs import (
 def _fileno_can_read(fileno):
     """Check if a file descriptor is readable."""
     return len(select.select([fileno], [], [], 0)[0]) > 0
+
 
 COMMON_CAPABILITIES = [CAPABILITY_OFS_DELTA, CAPABILITY_SIDE_BAND_64K]
 FETCH_CAPABILITIES = ([CAPABILITY_THIN_PACK, CAPABILITY_MULTI_ACK,
@@ -173,6 +181,8 @@ def read_pkt_refs(proto):
 
     if len(refs) == 0:
         return None, set([])
+    if refs == {CAPABILITIES_REF: ZERO_SHA}:
+        refs = {}
     return refs, set(server_capabilities)
 
 
@@ -184,7 +194,7 @@ class GitClient(object):
 
     """
 
-    def __init__(self, thin_packs=True, report_activity=None):
+    def __init__(self, thin_packs=True, report_activity=None, quiet=False):
         """Create a new GitClient instance.
 
         :param thin_packs: Whether or not thin packs should be retrieved
@@ -194,9 +204,21 @@ class GitClient(object):
         self._report_activity = report_activity
         self._report_status_parser = None
         self._fetch_capabilities = set(FETCH_CAPABILITIES)
+        self._fetch_capabilities.add(capability_agent())
         self._send_capabilities = set(SEND_CAPABILITIES)
+        self._send_capabilities.add(capability_agent())
+        if quiet:
+            self._send_capabilities.add(CAPABILITY_QUIET)
         if not thin_packs:
             self._fetch_capabilities.remove(CAPABILITY_THIN_PACK)
+
+    def get_url(self, path):
+        """Retrieves full url to given path.
+
+        :param path: Repository path (as string)
+        :return: Url to path (as string)
+        """
+        raise NotImplementedError(self.get_url)
 
     def send_pack(self, path, determine_wants, generate_pack_contents,
                   progress=None, write_pack=write_pack_objects):
@@ -212,6 +234,8 @@ class GitClient(object):
         :raises SendPackError: if server rejects the pack data
         :raises UpdateRefsError: if the server supports report-status
                                  and rejects ref updates
+        :return: new_refs dictionary containing the changes that were made
+            {refname: new_ref}, including deleted refs.
         """
         raise NotImplementedError(self.send_pack)
 
@@ -223,12 +247,22 @@ class GitClient(object):
         :param determine_wants: Optional function to determine what refs
             to fetch
         :param progress: Optional progress function
-        :return: remote refs as dictionary
+        :return: Dictionary with all remote refs (not just those fetched)
         """
         if determine_wants is None:
             determine_wants = target.object_store.determine_wants_all
-
-        f, commit, abort = target.object_store.add_pack()
+        if CAPABILITY_THIN_PACK in self._fetch_capabilities:
+            # TODO(jelmer): Avoid reading entire file into memory and
+            # only processing it after the whole file has been fetched.
+            f = BytesIO()
+            def commit():
+                if f.tell():
+                    f.seek(0)
+                    target.object_store.add_thin_pack(f.read, None)
+            def abort():
+                pass
+        else:
+            f, commit, abort = target.object_store.add_pack()
         try:
             result = self.fetch_pack(
                 path, determine_wants, target.get_graph_walker(), f.write,
@@ -248,6 +282,7 @@ class GitClient(object):
         :param graph_walker: Object with next() and ack().
         :param pack_data: Callback called for each bit of data in the pack
         :param progress: Callback for progress reports (strings)
+        :return: Dictionary with all remote refs (not just those fetched)
         """
         raise NotImplementedError(self.fetch_pack)
 
@@ -323,17 +358,24 @@ class GitClient(object):
         :param proto: Protocol object to read from
         :param capabilities: List of negotiated capabilities
         :param old_refs: Old refs, as received from the server
-        :param new_refs: New refs
+        :param new_refs: Refs to change
         :return: (have, want) tuple
         """
         want = []
         have = [x for x in old_refs.values() if not x == ZERO_SHA]
         sent_capabilities = False
 
-        all_refs = set(new_refs.keys()).union(set(old_refs.keys()))
-        for refname in all_refs:
+        for refname in new_refs:
+            if not isinstance(refname, bytes):
+                raise TypeError('refname is not a bytestring: %r' % refname)
             old_sha1 = old_refs.get(refname, ZERO_SHA)
+            if not isinstance(old_sha1, bytes):
+                raise TypeError('old sha1 for %s is not a bytestring: %r' %
+                        (refname, old_sha1))
             new_sha1 = new_refs.get(refname, ZERO_SHA)
+            if not isinstance(new_sha1, bytes):
+                raise TypeError('old sha1 for %s is not a bytestring %r' %
+                        (refname, new_sha1))
 
             if old_sha1 != new_sha1:
                 if sent_capabilities:
@@ -472,6 +514,8 @@ class TraditionalGitClient(GitClient):
         :raises SendPackError: if server rejects the pack data
         :raises UpdateRefsError: if the server supports report-status
                                  and rejects ref updates
+        :return: new_refs dictionary containing the changes that were made
+            {refname: new_ref}, including deleted refs.
         """
         proto, unused_can_read = self._connect(b'receive-pack', path)
         with proto:
@@ -512,7 +556,7 @@ class TraditionalGitClient(GitClient):
 
             (have, want) = self._handle_receive_pack_head(
                 proto, negotiated_capabilities, old_refs, new_refs)
-            if not want and old_refs == new_refs:
+            if not want and set(new_refs.items()).issubset(set(old_refs.items())):
                 return new_refs
             objects = generate_pack_contents(have, want)
 
@@ -535,6 +579,7 @@ class TraditionalGitClient(GitClient):
         :param graph_walker: Object with next() and ack().
         :param pack_data: Callback called for each bit of data in the pack
         :param progress: Callback for progress reports (strings)
+        :return: Dictionary with all remote refs (not just those fetched)
         """
         proto, can_read = self._connect(b'upload-pack', path)
         with proto:
@@ -597,12 +642,18 @@ class TraditionalGitClient(GitClient):
 class TCPGitClient(TraditionalGitClient):
     """A Git Client that works over TCP directly (i.e. git://)."""
 
-    def __init__(self, host, port=None, *args, **kwargs):
+    def __init__(self, host, port=None, **kwargs):
         if port is None:
             port = TCP_GIT_PORT
         self._host = host
         self._port = port
-        TraditionalGitClient.__init__(self, *args, **kwargs)
+        super(TCPGitClient, self).__init__(**kwargs)
+
+    def get_url(self, path):
+        netloc = self._host
+        if self._port is not None and self._port != TCP_GIT_PORT:
+            netloc += ":%d" % self._port
+        return urlparse.urlunsplit(("git", netloc, path, '', ''))
 
     def _connect(self, cmd, path):
         if type(cmd) is not bytes:
@@ -642,9 +693,9 @@ class TCPGitClient(TraditionalGitClient):
         proto.send_cmd(b'git-' + cmd, path, b'host=' + self._host.encode('ascii'))
         return proto, lambda: _fileno_can_read(s)
 
-
+"""
 class SubprocessWrapper(object):
-    """A socket-like object that talks to a subprocess via pipes."""
+    ""A socket-like object that talks to a subprocess via pipes.""
 
     def __init__(self, proc):
         self.proc = proc
@@ -655,7 +706,7 @@ class SubprocessWrapper(object):
         self.write = proc.stdin.write
 
     def can_read(self):
-        if subprocess.mswindows:
+        if sys.platform == 'win32':
             from msvcrt import get_osfhandle
             from win32pipe import PeekNamedPipe
             handle = get_osfhandle(self.proc.stdout.fileno())
@@ -670,11 +721,13 @@ class SubprocessWrapper(object):
         if self.proc.stderr:
             self.proc.stderr.close()
         self.proc.wait()
+"""
+"""
 
 
 def find_git_command():
-    """Find command to run for system Git (usually C Git).
-    """
+    ""Find command to run for system Git (usually C Git).
+    ""
     if sys.platform == 'win32': # support .exe, .bat and .cmd
         try: # to avoid overhead
             import win32api
@@ -688,24 +741,24 @@ def find_git_command():
 
 
 class SubprocessGitClient(TraditionalGitClient):
-    """Git client that talks to a server using a subprocess."""
+    ""Git client that talks to a server using a subprocess.""
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, **kwargs):
         self._connection = None
         self._stderr = None
         self._stderr = kwargs.get('stderr')
         if 'stderr' in kwargs:
             del kwargs['stderr']
-        TraditionalGitClient.__init__(self, *args, **kwargs)
+        super(SubprocessGitClient, self).__init__(**kwargs)
 
     git_command = None
 
     def _connect(self, service, path):
+        # FIXME: path manipulation
         if type(service) is not bytes:
             raise TypeError(path)
         if type(path) is not bytes:
             raise TypeError(path)
-        import subprocess
         if self.git_command is None:
             git_command = find_git_command()
         argv = git_command + [service.decode('ascii'), path]
@@ -715,7 +768,7 @@ class SubprocessGitClient(TraditionalGitClient):
                              stderr=self._stderr))
         return Protocol(p.read, p.write, p.close,
                         report_activity=self._report_activity), p.can_read
-
+"""
 
 class LocalGitClient(GitClient):
     """Git Client that just uses a local Repo."""
@@ -729,6 +782,9 @@ class LocalGitClient(GitClient):
         """
         self._report_activity = report_activity
         # Ignore the thin_packs argument
+
+    def get_url(self, path):
+        return urlparse.urlunsplit(('file', '', path, '', ''))
 
     def send_pack(self, path, determine_wants, generate_pack_contents,
                   progress=None, write_pack=write_pack_objects):
@@ -744,7 +800,11 @@ class LocalGitClient(GitClient):
         :raises SendPackError: if server rejects the pack data
         :raises UpdateRefsError: if the server supports report-status
                                  and rejects ref updates
+        :return: new_refs dictionary containing the changes that were made
+            {refname: new_ref}, including deleted refs.
         """
+        if not progress:
+            progress = lambda x: None
         from dulwich.repo import Repo
 
         with closing(Repo(path)) as target:
@@ -753,20 +813,23 @@ class LocalGitClient(GitClient):
 
             have = [sha1 for sha1 in old_refs.values() if sha1 != ZERO_SHA]
             want = []
-            all_refs = set(new_refs.keys()).union(set(old_refs.keys()))
-            for refname in all_refs:
-                old_sha1 = old_refs.get(refname, ZERO_SHA)
-                new_sha1 = new_refs.get(refname, ZERO_SHA)
-                if new_sha1 not in have and new_sha1 != ZERO_SHA:
+            for refname, new_sha1 in new_refs.items():
+                if new_sha1 not in have and not new_sha1 in want and new_sha1 != ZERO_SHA:
                     want.append(new_sha1)
 
-            if not want and old_refs == new_refs:
+            if not want and set(new_refs.items()).issubset(set(old_refs.items())):
                 return new_refs
 
             target.object_store.add_objects(generate_pack_contents(have, want))
 
-            for name, sha in new_refs.items():
-                target.refs[name] = sha
+            for refname, new_sha1 in new_refs.items():
+                old_sha1 = old_refs.get(refname, ZERO_SHA)
+                if new_sha1 != ZERO_SHA:
+                    if not target.refs.set_if_equals(refname, old_sha1, new_sha1):
+                        progress('unable to set %s to %s' % (refname, new_sha1))
+                else:
+                    if not target.refs.remove_if_equals(refname, old_sha1):
+                        progress('unable to remove %s' % refname)
 
         return new_refs
 
@@ -778,7 +841,7 @@ class LocalGitClient(GitClient):
         :param determine_wants: Optional function to determine what refs
             to fetch
         :param progress: Optional progress function
-        :return: remote refs as dictionary
+        :return: Dictionary with all remote refs (not just those fetched)
         """
         from dulwich.repo import Repo
         with closing(Repo(path)) as r:
@@ -793,6 +856,7 @@ class LocalGitClient(GitClient):
         :param graph_walker: Object with next() and ack().
         :param pack_data: Callback called for each bit of data in the pack
         :param progress: Callback for progress reports (strings)
+        :return: Dictionary with all remote refs (not just those fetched)
         """
         from dulwich.repo import Repo
         with closing(Repo(path)) as r:
@@ -839,16 +903,14 @@ class SSHVendor(object):
         """
         raise NotImplementedError(self.run_command)
 
-
+"""
 class SubprocessSSHVendor(SSHVendor):
-    """SSH vendor that shells out to the local 'ssh' command."""
+    ""SSH vendor that shells out to the local 'ssh' command.""
 
     def run_command(self, host, command, username=None, port=None):
-        if (type(command) is not list or
-            not all([isinstance(b, bytes) for b in command])):
+        if not isinstance(command, bytes):
             raise TypeError(command)
 
-        import subprocess
         #FIXME: This has no way to deal with passwords..
         args = ['ssh', '-x']
         if port is not None:
@@ -856,145 +918,51 @@ class SubprocessSSHVendor(SSHVendor):
         if username is not None:
             host = '%s@%s' % (username, host)
         args.append(host)
-        proc = subprocess.Popen(args + command,
+        proc = subprocess.Popen(args + [command],
                                 stdin=subprocess.PIPE,
                                 stdout=subprocess.PIPE)
         return SubprocessWrapper(proc)
 
 
-try:
-    import paramiko
-except ImportError:
-    pass
-else:
-    import threading
-
-    class ParamikoWrapper(object):
-        STDERR_READ_N = 2048  # 2k
-
-        def __init__(self, client, channel, progress_stderr=None):
-            self.client = client
-            self.channel = channel
-            self.progress_stderr = progress_stderr
-            self.should_monitor = bool(progress_stderr) or True
-            self.monitor_thread = None
-            self.stderr = b''
-
-            # Channel must block
-            self.channel.setblocking(True)
-
-            # Start
-            if self.should_monitor:
-                self.monitor_thread = threading.Thread(
-                    target=self.monitor_stderr)
-                self.monitor_thread.start()
-
-        def monitor_stderr(self):
-            while self.should_monitor:
-                # Block and read
-                data = self.read_stderr(self.STDERR_READ_N)
-
-                # Socket closed
-                if not data:
-                    self.should_monitor = False
-                    break
-
-                # Emit data
-                if self.progress_stderr:
-                    self.progress_stderr(data)
-
-                # Append to buffer
-                self.stderr += data
-
-        def stop_monitoring(self):
-            # Stop StdErr thread
-            if self.should_monitor:
-                self.should_monitor = False
-                self.monitor_thread.join()
-
-                # Get left over data
-                data = self.channel.in_stderr_buffer.empty()
-                self.stderr += data
-
-        def can_read(self):
-            return self.channel.recv_ready()
-
-        def write(self, data):
-            return self.channel.sendall(data)
-
-        def read_stderr(self, n):
-            return self.channel.recv_stderr(n)
-
-        def read(self, n=None):
-            data = self.channel.recv(n)
-            data_len = len(data)
-
-            # Closed socket
-            if not data:
-                return
-
-            # Read more if needed
-            if n and data_len < n:
-                diff_len = n - data_len
-                return data + self.read(diff_len)
-            return data
-
-        def close(self):
-            self.channel.close()
-            self.stop_monitoring()
-
-    class ParamikoSSHVendor(object):
-
-        def __init__(self):
-            self.ssh_kwargs = {}
-
-        def run_command(self, host, command, username=None, port=None,
-                        progress_stderr=None):
-            if (type(command) is not list or
-                not all([isinstance(b, bytes) for b in command])):
-                raise TypeError(command)
-            # Paramiko needs an explicit port. None is not valid
-            if port is None:
-                port = 22
-
-            client = paramiko.SSHClient()
-
-            policy = paramiko.client.MissingHostKeyPolicy()
-            client.set_missing_host_key_policy(policy)
-            client.connect(host, username=username, port=port,
-                           **self.ssh_kwargs)
-
-            # Open SSH session
-            channel = client.get_transport().open_session()
-
-            # Run commands
-            channel.exec_command(subprocess.list2cmdline(command))
-
-            return ParamikoWrapper(
-                client, channel, progress_stderr=progress_stderr)
+def ParamikoSSHVendor(**kwargs):
+    import warnings
+    warnings.warn(
+        "ParamikoSSHVendor has been moved to dulwich.contrib.paramiko_vendor.",
+        DeprecationWarning)
+    from dulwich.contrib.paramiko_vendor import ParamikoSSHVendor
+    return ParamikoSSHVendor(**kwargs)
 
 
 # Can be overridden by users
 get_ssh_vendor = SubprocessSSHVendor
 
-
 class SSHGitClient(TraditionalGitClient):
 
-    def __init__(self, host, port=None, username=None, *args, **kwargs):
+    def __init__(self, host, port=None, username=None, vendor=None, **kwargs):
         self.host = host
         self.port = port
         self.username = username
-        TraditionalGitClient.__init__(self, *args, **kwargs)
+        super(SSHGitClient, self).__init__(**kwargs)
         self.alternative_paths = {}
+        if vendor is not None:
+            self.ssh_vendor = vendor
+        else:
+            self.ssh_vendor = get_ssh_vendor()
+
+    def get_url(self, path):
+        netloc = self.host
+        if self.port is not None:
+            netloc += ":%d" % self.port
+
+        if self.username is not None:
+            netloc = urlquote(self.username, '@/:') + "@" + netloc
+
+        return urlparse.urlunsplit(('ssh', netloc, path, '', ''))
 
     def _get_cmd_path(self, cmd):
         cmd = self.alternative_paths.get(cmd, b'git-' + cmd)
         assert isinstance(cmd, bytes)
-        if sys.version_info[:2] <= (2, 6):
-            return shlex.split(cmd)
-        else:
-            # TODO(jelmer): Don't decode/encode here
-            return [x.encode('ascii') for x in shlex.split(cmd.decode('ascii'))]
+        return cmd
 
     def _connect(self, cmd, path):
         if type(cmd) is not bytes:
@@ -1003,13 +971,18 @@ class SSHGitClient(TraditionalGitClient):
             raise TypeError(path)
         if path.startswith(b"/~"):
             path = path[1:]
-        argv = self._get_cmd_path(cmd) + [path]
-        con = get_ssh_vendor().run_command(
+        argv = self._get_cmd_path(cmd) + b" '" + path + b"'"
+        con = self.ssh_vendor.run_command(
             self.host, argv, port=self.port, username=self.username)
         return (Protocol(con.read, con.write, con.close,
                          report_activity=self._report_activity),
                 con.can_read)
+"""
+class SSHGitClient:
+    def __init__(self):
+        raise NotImplementedError("SSHGitClient is a security risk.")
 
+get_ssh_vendor = SSHGitClient
 
 def default_user_agent_string():
     return "dulwich/%s" % ".".join([str(x) for x in dulwich.__version__])
@@ -1036,21 +1009,23 @@ def default_urllib2_opener(config):
 
 class HttpGitClient(GitClient):
 
-    def __init__(self, base_url, dumb=None, opener=None, config=None, *args,
-                 **kwargs):
-        self.base_url = base_url.rstrip("/") + "/"
+    def __init__(self, base_url, dumb=None, opener=None, config=None, **kwargs):
+        self._base_url = base_url.rstrip("/") + "/"
         self.dumb = dumb
         if opener is None:
             self.opener = default_urllib2_opener(config)
         else:
             self.opener = opener
-        GitClient.__init__(self, *args, **kwargs)
+        GitClient.__init__(self, **kwargs)
+
+    def get_url(self, path):
+        return self._get_url(path).rstrip("/")
 
     def __repr__(self):
-        return "%s(%r, dumb=%r)" % (type(self).__name__, self.base_url, self.dumb)
+        return "%s(%r, dumb=%r)" % (type(self).__name__, self._base_url, self.dumb)
 
     def _get_url(self, path):
-        return urlparse.urljoin(self.base_url, path).rstrip("/") + "/"
+        return urlparse.urljoin(self._base_url, path).rstrip("/") + "/"
 
     def _http_request(self, url, headers={}, data=None):
         req = urllib2.Request(url, headers=headers, data=data)
@@ -1068,18 +1043,27 @@ class HttpGitClient(GitClient):
         url = urlparse.urljoin(url, "info/refs")
         headers = {}
         if self.dumb is not False:
-            url += "?service=%s" % service
-            headers["Content-Type"] = "application/x-%s-request" % service
+            url += "?service=%s" % service.decode('ascii')
+            headers["Content-Type"] = "application/x-%s-request" % (
+                service.decode('ascii'))
         resp = self._http_request(url, headers)
         try:
-            self.dumb = (not resp.info().gettype().startswith("application/x-git-"))
+            content_type = resp.info().gettype()
+        except AttributeError:
+            content_type = resp.info().get_content_type()
+        try:
+            self.dumb = (not content_type.startswith("application/x-git-"))
             if not self.dumb:
                 proto = Protocol(resp.read, None)
                 # The first line should mention the service
-                pkts = list(proto.read_pkt_seq())
-                if pkts != [('# service=%s\n' % service)]:
+                try:
+                    [pkt] = list(proto.read_pkt_seq())
+                except ValueError:
                     raise GitProtocolError(
-                        "unexpected first line %r from smart server" % pkts)
+                        "unexpected number of packets received")
+                if pkt.rstrip(b'\n') != (b'# service=' + service):
+                    raise GitProtocolError(
+                        "unexpected first line %r from smart server" % pkt)
                 return read_pkt_refs(proto)
             else:
                 return read_info_refs(resp), set()
@@ -1089,11 +1073,18 @@ class HttpGitClient(GitClient):
     def _smart_request(self, service, url, data):
         assert url[-1] == "/"
         url = urlparse.urljoin(url, service)
-        headers = {"Content-Type": "application/x-%s-request" % service}
+        headers = {
+            "Content-Type": "application/x-%s-request" % service
+        }
         resp = self._http_request(url, headers, data)
-        if resp.info().gettype() != ("application/x-%s-result" % service):
+        try:
+            content_type = resp.info().gettype()
+        except AttributeError:
+            content_type = resp.info().get_content_type()
+        if content_type != (
+                "application/x-%s-result" % service):
             raise GitProtocolError("Invalid content-type from server: %s"
-                % resp.info().gettype())
+                % content_type)
         return resp
 
     def send_pack(self, path, determine_wants, generate_pack_contents,
@@ -1110,6 +1101,8 @@ class HttpGitClient(GitClient):
         :raises SendPackError: if server rejects the pack data
         :raises UpdateRefsError: if the server supports report-status
                                  and rejects ref updates
+        :return: new_refs dictionary containing the changes that were made
+            {refname: new_ref}, including deleted refs.
         """
         url = self._get_url(path)
         old_refs, server_capabilities = self._discover_references(
@@ -1121,6 +1114,7 @@ class HttpGitClient(GitClient):
 
         new_refs = determine_wants(dict(old_refs))
         if new_refs is None:
+            # Determine wants function is aborting the push.
             return old_refs
         if self.dumb:
             raise NotImplementedError(self.fetch_pack)
@@ -1128,12 +1122,12 @@ class HttpGitClient(GitClient):
         req_proto = Protocol(None, req_data.write)
         (have, want) = self._handle_receive_pack_head(
             req_proto, negotiated_capabilities, old_refs, new_refs)
-        if not want and old_refs == new_refs:
+        if not want and set(new_refs.items()).issubset(set(old_refs.items())):
             return new_refs
         objects = generate_pack_contents(have, want)
         if len(objects) > 0:
             write_pack(req_proto.write_file(), objects)
-        resp = self._smart_request(b"git-receive-pack", url,
+        resp = self._smart_request("git-receive-pack", url,
                                    data=req_data.getvalue())
         try:
             resp_proto = Protocol(resp.read, None)
@@ -1152,7 +1146,7 @@ class HttpGitClient(GitClient):
         :param graph_walker: Object with next() and ack().
         :param pack_data: Callback called for each bit of data in the pack
         :param progress: Callback for progress reports (strings)
-        :return: Dictionary with the refs of the remote repository
+        :return: Dictionary with all remote refs (not just those fetched)
         """
         url = self._get_url(path)
         refs, server_capabilities = self._discover_references(
@@ -1171,7 +1165,7 @@ class HttpGitClient(GitClient):
             req_proto, negotiated_capabilities, graph_walker, wants,
             lambda: False)
         resp = self._smart_request(
-            b"git-upload-pack", url, data=req_data.getvalue())
+            "git-upload-pack", url, data=req_data.getvalue())
         try:
             resp_proto = Protocol(resp.read, None)
             self._handle_upload_pack_tail(resp_proto, negotiated_capabilities,
@@ -1202,7 +1196,7 @@ def get_transport_and_path_from_url(url, config=None, **kwargs):
     if parsed.scheme == 'git':
         return (TCPGitClient(parsed.hostname, port=parsed.port, **kwargs),
                 parsed.path)
-    elif parsed.scheme == 'git+ssh':
+    elif parsed.scheme in ('git+ssh', 'ssh'):
         path = parsed.path
         if path.startswith('/'):
             path = parsed.path[1:]

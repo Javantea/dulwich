@@ -24,7 +24,7 @@ remote program.
 A common way of sending a unit of information is a pkt_line. This is a 4 byte
 size as human encoded hex (i.e. totally underusing the 4 bytes...) that tells
 you the size of the payload, followed by the payload. The size includes the 4
-byes used by the size itself.
+bytes used by the size itself.
 
     0009ABCD\n
 
@@ -51,7 +51,7 @@ The server tells the client what refs it has. The client states which of those
 SHA1's it would like. It then starts to report which SHA1's it has. The server
 ACKs these allowing the client to work out when to stop sending SHA1's. This
 saves a lot of transfer because the client can make decisions like "well if it
-has this SHA, then it has all its parents so i dont need to care about those".
+has this SHA, then it has all its parents so I don't need to care about those".
 When the client stops sending shas, the server can work out an optimal pack and
 then send it to the client.
 

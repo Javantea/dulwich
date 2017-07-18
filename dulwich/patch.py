@@ -52,6 +52,7 @@ def write_commit_patch(f, commit, contents, progress, version=None, encoding=Non
     f.write(b"\n")
     f.write(b"---\n")
     try:
+        # FIXME: path manipulation
         import subprocess
         p = subprocess.Popen(["diffstat"], stdout=subprocess.PIPE,
                              stdin=subprocess.PIPE)
@@ -112,7 +113,7 @@ def unified_diff(a, b, fromfile, tofile, n=3):
 
 def is_binary(content):
     """See if the first few bytes contain any null characters.
-
+    NOTE: This is not a very trustworthy function.
     :param content: Bytestring to check for binary content
     """
     return b'\0' in content[:FIRST_FEW_BYTES]
@@ -122,13 +123,15 @@ def shortid(hexsha):
     if hexsha is None:
         return b"0" * 7
     else:
-        return hexsha[:7]
+        return hexsha[:7]#.decode('ascii')
 
 
 def patch_filename(p, root):
     if p is None:
         return b"/dev/null"
     else:
+        if type(p) == str: p = p.encode('utf-8')
+        if type(root) == str: root = root.encode('utf-8')
         return root + b"/" + p
 
 

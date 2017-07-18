@@ -16,10 +16,16 @@
 # Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston,
 # MA  02110-1301, USA.
 
-"""Access to hooks."""
+"""Access to hooks.
+
+FIXME:
+Hooks are simply a bad idea. I understand the concept. That's no excuse for 
+this type of code execution bullshit. Give an attacker remote code execution? 
+No thank you.
+"""
 
 import os
-import subprocess
+#import subprocess
 import sys
 import tempfile
 
@@ -89,7 +95,9 @@ class ShellHook(Hook):
             args = self.pre_exec_callback(*args)
 
         try:
-            ret = subprocess.call([self.filepath] + list(args))
+            # FIXME: Hooks are bad design. Replace them.
+            #ret = subprocess.call([self.filepath] + list(args))
+            ret = 0
             if ret != 0:
                 if (self.post_exec_callback is not None):
                     self.post_exec_callback(0, *args)
@@ -131,10 +139,19 @@ class CommitMsgShellHook(ShellHook):
         filepath = os.path.join(controldir, 'hooks', 'commit-msg')
 
         def prepare_msg(*args):
+            """
+            FIXME:
+            More generally, the POSIX specification of mkstemp() does not say 
+            anything about file modes, so the application should make sure its 
+            file mode creation mask (see umask(2)) is set appropriately before 
+            calling mkstemp() (and mkostemp())."""
             (fd, path) = tempfile.mkstemp()
 
+            a0 = args[0]
+            if type(a0) == str:
+                a0 = args[0].encode('utf-8')
             with os.fdopen(fd, 'wb') as f:
-                f.write(args[0])
+                f.write(a0)
 
             return (path,)
 

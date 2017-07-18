@@ -20,6 +20,19 @@
 #include <Python.h>
 #include <stdint.h>
 
+#if PY_MAJOR_VERSION >= 3
+#define PyInt_FromLong PyLong_FromLong
+#define PyString_AS_STRING PyBytes_AS_STRING
+#define PyString_AsString PyBytes_AsString
+#define PyString_Check PyBytes_Check
+#define PyString_CheckExact PyBytes_CheckExact
+#define PyString_FromStringAndSize PyBytes_FromStringAndSize
+#define PyString_FromString PyBytes_FromString
+#define PyString_GET_SIZE PyBytes_GET_SIZE
+#define PyString_Size PyBytes_Size
+#define _PyString_Join _PyBytes_Join
+#endif
+
 static PyObject *PyExc_ApplyDeltaError = NULL;
 
 static int py_is_sha(PyObject *sha)
@@ -34,10 +47,10 @@ static int py_is_sha(PyObject *sha)
 }
 
 
-static size_t get_delta_header_size(uint8_t *delta, int *index, int length)
+static size_t get_delta_header_size(uint8_t *delta, size_t *index, size_t length)
 {
 	size_t size = 0;
-	int i = 0;
+	size_t i = 0;
 	while ((*index) < length) {
 		uint8_t cmd = delta[*index];
 		(*index)++;
@@ -76,10 +89,10 @@ static PyObject *py_chunked_as_string(PyObject *py_buf)
 static PyObject *py_apply_delta(PyObject *self, PyObject *args)
 {
 	uint8_t *src_buf, *delta;
-	int src_buf_len, delta_len;
+	size_t src_buf_len, delta_len;
 	size_t src_size, dest_size;
 	size_t outindex = 0;
-	int index;
+	size_t index;
 	uint8_t *out;
 	PyObject *ret, *py_src_buf, *py_delta, *ret_list;
 
@@ -97,16 +110,16 @@ static PyObject *py_apply_delta(PyObject *self, PyObject *args)
 	}
 
 	src_buf = (uint8_t *)PyString_AS_STRING(py_src_buf);
-	src_buf_len = PyString_GET_SIZE(py_src_buf);
+	src_buf_len = (size_t)PyString_GET_SIZE(py_src_buf);
 
 	delta = (uint8_t *)PyString_AS_STRING(py_delta);
-	delta_len = PyString_GET_SIZE(py_delta);
+	delta_len = (size_t)PyString_GET_SIZE(py_delta);
 
 	index = 0;
 	src_size = get_delta_header_size(delta, &index, delta_len);
 	if (src_size != src_buf_len) {
 		PyErr_Format(PyExc_ApplyDeltaError,
-					 "Unexpected source buffer size: %lu vs %d", src_size, src_buf_len);
+					 "Unexpected source buffer size: %lu vs %ld", src_size, src_buf_len);
 		Py_DECREF(py_src_buf);
 		Py_DECREF(py_delta);
 		return NULL;
@@ -121,7 +134,7 @@ static PyObject *py_apply_delta(PyObject *self, PyObject *args)
 	}
 	out = (uint8_t *)PyString_AsString(ret);
 	while (index < delta_len) {
-		char cmd = delta[index];
+		uint8_t cmd = delta[index];
 		index++;
 		if (cmd & 0x80) {
 			size_t cp_off = 0, cp_size = 0;
@@ -193,8 +206,13 @@ static PyObject *py_bisect_find_sha(PyObject *self, PyObject *args)
 	char *sha;
 	int sha_len;
 	int start, end;
-	if (!PyArg_ParseTuple(args, "iis#O", &start, &end, 
-						  &sha, &sha_len, &unpack_name))
+#if PY_MAJOR_VERSION >= 3
+	if (!PyArg_ParseTuple(args, "iiy#O", &start, &end,
+			      &sha, &sha_len, &unpack_name))
+#else
+	if (!PyArg_ParseTuple(args, "iis#O", &start, &end,
+			      &sha, &sha_len, &unpack_name))
+#endif
 		return NULL;
 
 	if (sha_len != 20) {
@@ -239,20 +257,53 @@ static PyMethodDef py_pack_methods[] = {
 	{ NULL, NULL, 0, NULL }
 };
 
-void init_pack(void)
+static PyObject *
+moduleinit(void)
 {
 	PyObject *m;
 	PyObject *errors_module;
 
 	errors_module = PyImport_ImportModule("dulwich.errors");
 	if (errors_module == NULL)
-		return;
+		return NULL;
 
 	PyExc_ApplyDeltaError = PyObject_GetAttrString(errors_module, "ApplyDeltaError");
+	Py_DECREF(errors_module);
 	if (PyExc_ApplyDeltaError == NULL)
-		return;
+		return NULL;
 
+#if PY_MAJOR_VERSION >= 3
+	static struct PyModuleDef moduledef = {
+	  PyModuleDef_HEAD_INIT,
+	  "_pack",         /* m_name */
+	  NULL,            /* m_doc */
+	  -1,              /* m_size */
+	  py_pack_methods, /* m_methods */
+	  NULL,            /* m_reload */
+	  NULL,            /* m_traverse */
+	  NULL,            /* m_clear*/
+	  NULL,            /* m_free */
+	};
+	m = PyModule_Create(&moduledef);
+#else
 	m = Py_InitModule3("_pack", py_pack_methods, NULL);
+#endif
 	if (m == NULL)
-		return;
+		return NULL;
+
+	return m;
 }
+
+#if PY_MAJOR_VERSION >= 3
+PyMODINIT_FUNC
+PyInit__pack(void)
+{
+	return moduleinit();
+}
+#else
+PyMODINIT_FUNC
+init_pack(void)
+{
+	moduleinit();
+}
+#endif

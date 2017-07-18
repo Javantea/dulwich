@@ -82,6 +82,7 @@ from dulwich.refs import (
 import warnings
 
 
+CONTROLDIR = '.git'
 OBJECTDIR = 'objects'
 REFSDIR = 'refs'
 REFSDIR_TAGS = 'tags'
@@ -611,11 +612,11 @@ class BaseRepo(object):
                 old_head = self.refs[ref]
                 c.parents = [old_head] + merge_heads
                 self.object_store.add_object(c)
-                ok = self.refs.set_if_equals(ref, old_head, c.id)
+                ok = self.refs.set_if_equals(ref, old_head, c.id.encode('ascii'))
             except KeyError:
                 c.parents = merge_heads
                 self.object_store.add_object(c)
-                ok = self.refs.add_if_new(ref, c.id)
+                ok = self.refs.add_if_new(ref, c.id.encode('ascii'))
             if not ok:
                 # Fail if the atomic compare-and-swap failed, leaving the commit and
                 # all its objects as garbage.
@@ -631,6 +632,21 @@ class BaseRepo(object):
         return c.id
 
 
+
+def read_gitfile(f):
+    """Read a ``.git`` file.
+
+    The first line of the file should start with "gitdir: "
+
+    :param f: File-like object to read from
+    :return: A path
+    """
+    cs = f.read()
+    if not cs.startswith("gitdir: "):
+        raise ValueError("Expected file to start with 'gitdir: '")
+    return cs[len("gitdir: "):].rstrip("\n")
+
+
 class Repo(BaseRepo):
     """A git repository backed by local disk.
 
@@ -641,17 +657,18 @@ class Repo(BaseRepo):
     """
 
     def __init__(self, root):
-        if os.path.isdir(os.path.join(root, ".git", OBJECTDIR)):
+        hidden_path = os.path.join(root, CONTROLDIR)
+        if os.path.isdir(os.path.join(hidden_path, OBJECTDIR)):
             self.bare = False
-            self._controldir = os.path.join(root, ".git")
+            self._controldir = hidden_path
         elif (os.path.isdir(os.path.join(root, OBJECTDIR)) and
               os.path.isdir(os.path.join(root, REFSDIR))):
             self.bare = True
             self._controldir = root
-        elif (os.path.isfile(os.path.join(root, ".git"))):
-            import re
-            with open(os.path.join(root, ".git"), 'r') as f:
-                _, path = re.match('(gitdir: )(.+$)', f.read()).groups()
+        elif os.path.isfile(hidden_path):
+            self.bare = False
+            with open(hidden_path, 'r') as f:
+                path = read_gitfile(f)
             self.bare = False
             self._controldir = os.path.join(root, path)
         else:
@@ -816,9 +833,9 @@ class Repo(BaseRepo):
             pass
 
         # Update target head
-        head, head_sha = self.refs._follow(b'HEAD')
-        if head is not None and head_sha is not None:
-            target.refs.set_symbolic_ref(b'HEAD', head)
+        head_chain, head_sha = self.refs.follow(b'HEAD')
+        if head_chain and head_sha is not None:
+            target.refs.set_symbolic_ref(b'HEAD', head_chain[-1])
             target[b'HEAD'] = head_sha
 
             if not bare:
@@ -910,7 +927,7 @@ class Repo(BaseRepo):
         """
         if mkdir:
             os.mkdir(path)
-        controldir = os.path.join(path, ".git")
+        controldir = os.path.join(path, CONTROLDIR)
         os.mkdir(controldir)
         cls._init_maybe_bare(controldir, False)
         return cls(path)

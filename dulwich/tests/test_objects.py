@@ -48,8 +48,9 @@ from dulwich.objects import (
     hex_to_filename,
     check_hexsha,
     check_identity,
-    parse_timezone,
     object_class,
+    parse_timezone,
+    pretty_format_tree_entry,
     parse_tree,
     _parse_tree_py,
     sorted_tree_items,
@@ -231,7 +232,7 @@ class BlobReadTests(TestCase):
         c = make_commit(id=sha, message=b'foo')
         self.assertTrue(isinstance(c, Commit))
         self.assertEqual(sha, c.id)
-        self.assertNotEqual(sha, c._make_sha())
+        self.assertNotEqual(sha, c.sha())
 
 
 class ShaFileCheckTests(TestCase):
@@ -818,6 +819,20 @@ class TagSerializeTests(TestCase):
                           b'\n'
                           b'Tag 0.1'), x.as_raw_string())
 
+    def test_serialize_none_message(self):
+        x = make_object(Tag,
+                        tagger=b'Jelmer Vernooij <jelmer@samba.org>',
+                        name=b'0.1',
+                        message=None,
+                        object=(Blob, b'd80c186a03f423a81b39df39dc87fd269736ca86'),
+                        tag_time=423423423,
+                        tag_timezone=0)
+        self.assertEqual((b'object d80c186a03f423a81b39df39dc87fd269736ca86\n'
+                          b'type blob\n'
+                          b'tag 0.1\n'
+                          b'tagger Jelmer Vernooij <jelmer@samba.org> '
+                          b'423423423 +0000\n'), x.as_raw_string())
+
 
 default_tagger = (b'Linus Torvalds <torvalds@woody.linux-foundation.org> '
                   b'1183319674 -0700')
@@ -849,8 +864,8 @@ class TagParseTests(ShaFileCheckTests):
             lines.append(b'tag ' + name)
         if tagger is not None:
             lines.append(b'tagger ' + tagger)
-        lines.append(b'')
         if message is not None:
+            lines.append(b'')
             lines.append(message)
         return lines
 
@@ -875,6 +890,17 @@ class TagParseTests(ShaFileCheckTests):
         x = Tag()
         x.set_raw_string(self.make_tag_text(tagger=None))
         self.assertEqual(None, x.tagger)
+        self.assertEqual(b'v2.6.22-rc7', x.name)
+
+    def test_parse_no_message(self):
+        x = Tag()
+        x.set_raw_string(self.make_tag_text(message=None))
+        self.assertEqual(None, x.message)
+        self.assertEqual(
+            b'Linus Torvalds <torvalds@woody.linux-foundation.org>', x.tagger)
+        self.assertEqual(datetime.datetime.utcfromtimestamp(x.tag_time),
+                          datetime.datetime(2007, 7, 1, 19, 54, 34))
+        self.assertEqual(-25200, x.tag_timezone)
         self.assertEqual(b'v2.6.22-rc7', x.name)
 
     def test_check(self):
@@ -911,6 +937,20 @@ class TagParseTests(ShaFileCheckTests):
                 self.assertCheckSucceeds(Tag, text)
             else:
                 self.assertCheckFails(Tag, text)
+
+    def test_tree_copy_after_update(self):
+        """Check Tree.id is correctly updated when the tree is copied after updated.
+        """
+        shas = []
+        tree = Tree()
+        shas.append(tree.id)
+        tree.add(b'data', 0o644, Blob().id)
+        copied = tree.copy()
+        shas.append(tree.id)
+        shas.append(copied.id)
+
+        self.assertNotIn(shas[0], shas[1:])
+        self.assertEqual(shas[1], shas[2])
 
 
 class CheckTests(TestCase):
@@ -1091,3 +1131,13 @@ class ShaFileSerializeTests(TestCase):
 
         with self.assert_serialization_on_change(tag):
             tag.message = b'new message'
+
+
+class PrettyFormatTreeEntryTests(TestCase):
+
+    def test_format(self):
+        self.assertEquals(
+                '40000 tree 40820c38cfb182ce6c8b261555410d8382a5918b\tfoo\n',
+                pretty_format_tree_entry(b"foo", 0o40000,
+                    b"40820c38cfb182ce6c8b261555410d8382a5918b"))
+
